@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.38
+// @version      7.100.39
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -2176,7 +2176,8 @@
         const cur = (hidden && hidden.value) || '';
         if (cur !== expected) {
           stable = false;
-          vlog('Draftail: dolt fält i ' + fieldId + ' skrevs över efter ' + ((t + 1) * 0.5) + 's (försök ' + attempt + '/3) — skriver om.', 'warn');
+          // (v7.100.39) logga vad som ligger i dolda fältet när något skriver över det
+          vlog('Draftail: dolt fält i ' + fieldId + ' skrevs över efter ' + ((t + 1) * 0.5) + 's (försök ' + attempt + '/3) — skriver om. Innehåll där nu (' + cur.length + ' tecken): "' + cur.slice(0, 100) + '"', 'warn');
           break;
         }
       }
@@ -2230,12 +2231,19 @@
     return run;
   }
   async function updateDraftailStructuredInner(fieldId, transformFn, userAction = false) {
-    const last = draftailWriteStamp.get(fieldId) || 0;
-    if (!userAction && Date.now() - last < 15000) {
-      vlog('Beskrivning: skrivning till ' + fieldId + ' spärrad (redan skriven för <15 s sedan) — hoppar över för att undvika duplicering.', 'err');
-      return false;
-    }
-    draftailWriteStamp.set(fieldId, Date.now());
+    // (v7.100.39) Innehållsbaserad spärr: blockerar bara en skrivning vars
+    // innehåll är identiskt med det senast skrivna inom 15 s (sant duplicat).
+    // Ett äkta nytt innehåll (t.ex. versal/punktkuls-rättning efter en
+    // Mistral-omskrivning) går alltid igenom — skrivkön serialiserar.
+    const lockBlocked = (sig, preview) => {
+      const last = draftailWriteStamp.get(fieldId);
+      if (userAction || !last || !sig) return false;
+      if (Date.now() - last.t >= 15000 || last.sig !== sig) return false;
+      vlog('Beskrivning: skrivning till ' + fieldId + ' spärrad (identiskt innehåll redan skrivet för ' +
+        Math.round((Date.now() - last.t) / 1000) + ' s sedan, userAction=' + userAction +
+        ') — hoppar över för att undvika duplicering. Vägrad text: "' + String(preview).slice(0, 60) + '"', 'err');
+      return true;
+    };
     // SBR/textarea: ingen Draftail — kör transformFn på en enblock-JSON och
     // skriv platt text (samma beteende som updateDraftail).
     if (isTextareaField(fieldId)) {
@@ -2243,6 +2251,8 @@
       const cur = plainEl.value || '';
       const nj = transformFn({ blocks: cur ? [{ key: 't', text: cur, type: 'unstyled', depth: 0, inlineStyleRanges: [], entityRanges: [], data: {} }] : [], entityMap: {} }) || {};
       const txt = (nj.blocks || []).map(b => b.text || '').join('\n');
+      if (lockBlocked('T:' + txt, txt)) return false;
+      draftailWriteStamp.set(fieldId, { t: Date.now(), sig: 'T:' + txt });
       simulateInput(plainEl, txt);
       vlog(`Beskrivning ifylld (textarea, strukturerad): ${fieldId} → ${txt.slice(0, 60)}...`, 'ok');
       return true;
@@ -2253,7 +2263,11 @@
       const before = canonDraftJSON(cur);
       const newContent = transformFn(JSON.parse(JSON.stringify(cur)));
       if (!newContent || !Array.isArray(newContent.blocks)) return false;
-      if (canonDraftJSON(newContent) === before) return true;   // inget ändrades
+      const newCanon = canonDraftJSON(newContent);
+      if (newCanon === before) return true;   // inget ändrades
+      const newPreview = (newContent.blocks || []).map(b => b.text || '').join('\n');
+      if (lockBlocked('J:' + newCanon, newPreview)) return false;
+      draftailWriteStamp.set(fieldId, { t: Date.now(), sig: 'J:' + newCanon });
       const root = await mountDraftail(fieldId);
       const props = root && getDraftProps(root);
       if (props) {
@@ -2660,7 +2674,10 @@
   // funktionen aldrig något, så anropare (riktlinje-omskrivning, båda
   // översättningsvägarna) loggade "Klar" även när skrivningen hade misslyckats
   // tyst — användaren trodde texten var ersatt när den gamla låg kvar.
-  const draftailWriteStamp = new Map();
+  // (v7.100.39) Stämpeln lagrar nu { t, sig }: spärren blockerar bara en skrivning
+  // vars innehåll (sig) är IDENTISKT med det senast skrivna inom 15 s — ett äkta
+  // nytt innehåll går alltid igenom (skrivkön nedan serialiserar ändå).
+  const draftailWriteStamp = new Map();   // fieldId -> { t: number, sig: string }
   // (v7.100.31) skrivkö per fält: två parallella skrivningar till samma fält
   // (dubbelklick på "Skriv om", eller poll + knapptryck samtidigt) kunde
   // interfoliera tömning/paste i contentEditable-reserven och duplicera texten
@@ -2673,12 +2690,17 @@
     return run;
   }
   async function updateDraftailInner(fieldId, text, userAction = false) {
-    const last = draftailWriteStamp.get(fieldId) || 0;
-    if (!userAction && Date.now() - last < 15000) {
-      vlog('Beskrivning: skrivning till ' + fieldId + ' spärrad (redan skriven för <15 s sedan) — hoppar över för att undvika duplicering.', 'err');
+    // (v7.100.39) Samma innehållsbaserade spärr som i updateDraftailStructuredInner:
+    // bara identisk text som redan skrivits inom 15 s blockeras, nytt innehåll går igenom.
+    const sig = 'T:' + String(text);
+    const last = draftailWriteStamp.get(fieldId);
+    if (!userAction && last && Date.now() - last.t < 15000 && last.sig === sig) {
+      vlog('Beskrivning: skrivning till ' + fieldId + ' spärrad (identisk text redan skriven för ' +
+        Math.round((Date.now() - last.t) / 1000) + ' s sedan, userAction=' + userAction +
+        ') — hoppar över för att undvika duplicering. Vägrad text: "' + String(text).slice(0, 60) + '"', 'err');
       return false;
     }
-    draftailWriteStamp.set(fieldId, Date.now());
+    draftailWriteStamp.set(fieldId, { t: Date.now(), sig });
     // Bekräftat via fältkartläggning (2026-09-21) att SBR:s add-event-formulär
     // använder en VANLIG <textarea> för description_en/sv, inte Draftail —
     // mountDraftail() letar då förgäves efter en .DraftEditor-root som aldrig
@@ -9377,7 +9399,10 @@
       // med i prompten (bekräftat 2026-10-05: svaret kom tillbaka identiskt med
       // originalet). Emojis är ALDRIG tillåtna i evenemangstexter, så de tas
       // bort lokalt ur svaret som en garanti — samma mönster som stripEmDashes.
-      const cleaned = stripEmDashes(rewritten.trim()).replace(EMOJI_RE, '').replace(/ {2,}/g, ' ').trim();
+      // (v7.100.39) Autorättningen (VERSALER + • bort) appliceras lokalt direkt
+      // på Mistral-svaret, så slutgiltig text landar i EN skrivning (userAction=true)
+      // och behöver ingen andra skrivning inom 15 s-spärren.
+      const cleaned = fixCapsAndBullets(stripEmDashes(rewritten.trim()).replace(EMOJI_RE, '').replace(/ {2,}/g, ' ').trim());
       vlog('Riktlinje-omskrivning: Ersätter text i ' + fieldId + ' — gammal text: "' + text + '"');
       // (2026-10-20, v7.100.4) updateDraftail returnerar nu ärligt true/false —
       // logga MISSLYCKADES (inte "Klar") när texten inte landade, så användaren
@@ -9504,6 +9529,10 @@
   // Gemensam skrivväg för "hela texten byts ut" (rewrite/translate): Draftail
   // får strukturbevarande JSON, textarea/SBR får platt text som tidigare.
   function writeDescriptionField(fieldId, text, userAction) {
+    // (v7.100.39) logga vilken skrivväg som väljs (alla anropare är användarstyrda,
+    // så detta spämmer inte poll-loggen) — hela kedjan blir synlig i loggen.
+    vlog('writeDescriptionField: ' + fieldId + ' via ' + (isTextareaField(fieldId) ? 'textarea/updateDraftail' : 'draftail-strukturerad') +
+      ' (userAction=' + !!userAction + ', ' + String(text).length + ' tecken): "' + String(text).slice(0, 60) + '"');
     return isTextareaField(fieldId)
       ? updateDraftail(fieldId, text, userAction)
       : updateDraftailStructured(fieldId, draftailFullTextTransform(text), userAction);
@@ -9643,7 +9672,12 @@
     ['id_description_en', 'id_description_sv'].forEach(id => {
       const text = readFieldText(id);
       if (!text) return;
-      if (capsLastText.get(id) === text) return;
+      if (capsLastText.get(id) === text) {
+        // (v7.100.39) logga bara när något faktiskt återstår att rätta
+        // (annars spämmer varje poll ner loggen)
+        if (fixCapsAndBullets(text) !== text) vlog('Versaler/punktkulor: ' + id + ' har fortfarande •/VERSALER men samma text som senast sedd — väntar på nytt skrivförsök.', 'warn');
+        return;
+      }
       capsLastText.set(id, text);
       const fixed = fixCapsAndBullets(text);
       if (fixed === text) return;
@@ -9656,7 +9690,10 @@
           showAutoChangeNote(document.getElementById(id), 'VERSALER och punktkulor (•) borttagna i ' + id.replace('id_description_', 'beskrivning ') + ' (förkortningar som SEK/VIP behållna)');
           vlog('Versaler/punktkulor: rättade ' + id + '.', 'ok');
         } else {
-          vlog('Versaler/punktkulor: kunde INTE skriva till ' + id + ' automatiskt — rätta manuellt.', 'err');
+          // (v7.100.39) rulla tillbaka så pollern försöker igen nästa varv —
+          // en blockerad/misslyckad skrivning ska inte kasta bort rättningen
+          capsLastText.delete(id);
+          vlog('Versaler/punktkulor: kunde INTE skriva till ' + id + ' automatiskt just nu — rätta manuellt. Pollern försöker igen (capsLastText återställd).', 'err');
         }
       }).catch(() => {});
     });
@@ -9667,9 +9704,14 @@
     ['id_description_en', 'id_description_sv'].forEach(id => {
       const text = readFieldText(id);
       if (!text) return;
-      if (instaLastText.get(id) === text) return;
+      const hasHandle = new RegExp(INSTA_HANDLE_RE.source, 'gi').test(text);
+      if (instaLastText.get(id) === text) {
+        // (v7.100.39) logga bara när ett orört @handle finns kvar (annars poll-spam)
+        if (hasHandle) vlog('Instagram: ' + id + ' har fortfarande ett orört @handle men samma text som senast sedd — väntar på nytt skrivförsök.', 'warn');
+        return;
+      }
       instaLastText.set(id, text);
-      if (!new RegExp(INSTA_HANDLE_RE.source, 'gi').test(text)) return;
+      if (!hasHandle) return;
       // (v7.100.38) Draftail-fält: riktig LINK-entitet + BOLD på @handle (se
       // linkifyInstagramInJSON); markdown-strängen ENDAST för textarea/SBR.
       if (!isTextareaField(id)) {
@@ -9680,7 +9722,8 @@
             showAutoChangeNote(document.getElementById(id), 'Instagram-handle gjord till fet länk i ' + id.replace('id_description_', 'beskrivning ') + ': (Instagram: @…)');
             vlog('Instagram: länk skriven i ' + id + ' (LINK-entitet).', 'ok');
           } else {
-            vlog('Instagram: kunde INTE skriva länken till ' + id + ' automatiskt — gör om manuellt.', 'err');
+            instaLastText.delete(id);   // (v7.100.39) rulla tillbaka — pollern försöker igen
+            vlog('Instagram: kunde INTE skriva länken till ' + id + ' automatiskt just nu — gör om manuellt. Pollern försöker igen (instaLastText återställd).', 'err');
           }
         }).catch(() => {});
         return;
@@ -9694,7 +9737,8 @@
           showAutoChangeNote(document.getElementById(id), 'Instagram-handle gjord till fet länk i ' + id.replace('id_description_', 'beskrivning ') + ': (Instagram: [**@…**](…))');
           vlog('Instagram: länk skriven i ' + id + '.', 'ok');
         } else {
-          vlog('Instagram: kunde INTE skriva länken till ' + id + ' automatiskt — gör om manuellt.', 'err');
+          instaLastText.delete(id);   // (v7.100.39) rulla tillbaka — pollern försöker igen
+          vlog('Instagram: kunde INTE skriva länken till ' + id + ' automatiskt just nu — gör om manuellt. Pollern försöker igen (instaLastText återställd).', 'err');
         }
       }).catch(() => {});
     });
