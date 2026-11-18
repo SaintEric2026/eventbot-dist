@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.39
+// @version      7.100.40
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -2285,16 +2285,31 @@
               return true;
             }
           }
-          vlog('Beskrivning: React-vägen svarade men JSON:en verifierades inte i dolda fältet inom 5 s (' + fieldId + ') — reserv: writeDraftailJSON.', 'err');
+          vlog('Beskrivning: React-vägen svarade men JSON:en verifierades inte i dolda fältet inom 5 s (' + fieldId + ') — försöker contentEditable-paste först.', 'err');
         } catch (e) {
-          vlog('Beskrivning: fel vid strukturerad props-skrivning (' + fieldId + '): ' + (e && e.message ? e.message : e) + ' — reserv: writeDraftailJSON.', 'err');
+          vlog('Beskrivning: fel vid strukturerad props-skrivning (' + fieldId + '): ' + (e && e.message ? e.message : e) + ' — försöker contentEditable-paste först.', 'err');
         }
       } else {
-        vlog('Beskrivning: inga React-props för ' + fieldId + ' — skriver JSON direkt till dolda fältet (reserv).', 'warn');
+        vlog('Beskrivning: inga React-props för ' + fieldId + ' — försöker contentEditable-paste först (bara dolda fältet skrivs annars över av widgetens state vid render/spar).', 'warn');
       }
+      // (v7.100.40) contentEditable-reserv FÖRE dolda-fältet-reserven: när props saknas
+      // (eller props.onChange inte verifieras inom 5 s) måste texten in GENOM editorn —
+      // annars skriver Draftail över det dolda fältet från sitt eget (gamla) state vid
+      // nästa render/spar och ändringen försvinner vid omladdning. Verifierad
+      // select-all + töm + paste; platt text (struktur/länkar bevaras bara via props-
+      // vägen ovan). Dolda-fältet-JSON kvar som sista utväg.
+      if (root && await updateDraftailViaClipboard(fieldId, newPreview)) {
+        if (!draftailBrokenClear.has(fieldId) && draftailTextLanded(fieldId, newPreview)) {
+          vlog(`Beskrivning strukturerad via contentEditable-paste: ${fieldId} — widgeten synkade själv dolda fältet (verifierad på textnivå).`, 'ok');
+          await refreshDraftailScreen(fieldId, root, getDraftProps(root));
+          return true;
+        }
+        vlog('Beskrivning: paste ej verifierad eller fältet "broken" (' + fieldId + ') — går vidare till dolda-fältet-reserv.', 'warn');
+      }
+      vlog('Beskrivning: sista utväg — JSON direkt till dolda fältet (' + fieldId + '). OBS: synliga editorn uppdateras inte; om widgeten renderar om före spar kan den skriva över värdet.', 'warn');
       const ok = await guardDraftailWrite(fieldId, newContent);
       if (ok && draftailJSONLanded(fieldId, newContent)) {
-        vlog(`Beskrivning strukturerad via dolda fältet (reserv): ${fieldId} — verifierad på JSON-nivå.`, 'ok');
+        vlog(`Beskrivning strukturerad via dolda fältet (reserv): ${fieldId} — verifierad på JSON-nivå (men ej i synliga editorn).`, 'ok');
         await refreshDraftailScreen(fieldId, root, null);
         return true;
       }
@@ -9657,7 +9672,7 @@
   // och VERSAL-ord (hela ord i stora bokstäver, ≥2 tecken) skrivs om till normal
   // versalstart: "• FACTORY TOUR ..." → "Factory tour ...". Förkortningar i
   // versaler (SEK, EUR, VIP, WC …) lämnas orörda; blandade ord (iOS, McDonald) rörs inte.
-  const CAPS_WHITELIST = new Set(['SEK','EUR','USD','GBP','CHF','NOK','DKK','VIP','WC','TV','DJ','CD','LP','EP','HR','IT','AI','PR','ID','FAQ','SMS','MMS','PDF','GPS','SAS','SJ','SL','ATM','PIN','SIM','USB','DNA','IQ']);
+  const CAPS_WHITELIST = new Set(['SEK','EUR','USD','GBP','CHF','NOK','DKK','VIP','WC','TV','DJ','CD','LP','EP','HR','IT','AI','PR','ID','FAQ','SMS','MMS','PDF','GPS','SAS','SJ','SL','ATM','PIN','SIM','USB','DNA','IQ','NOTE']);   // (v7.100.40) NOTE = avsiktlig prefix "NOTE: The event is in Swedish." vid sv→en-översättning
   const CAPS_WORD_RE = /(?<![A-Za-z0-9\u00C0-\u00FF])[A-Z\u00C0-\u00D6\u00D8-\u00DE]{2,}(?![A-Za-z0-9])/g;
   function fixCapsAndBullets(text) {
     let t = text;
@@ -11116,7 +11131,10 @@
   // chat-anrop (titeln behöver en striktare "ENDAST titeln"-prompt för att
   // inte få med förklarande text). Sv→en lägger till "(in Swedish)" sist i
   // rubriken och "NOTE: The event is in Swedish." först i description.
+  let translateInFlight = false;   // (v7.100.40) titel- och description-knapparna kan trigga samtidigt — kör bara en översättning åt gången
   async function translateTitleAndDescription(targetLang) {
+    if (translateInFlight) { vlog('Översättning: kör redan — ignorerar extra klick.', 'warn'); return; }
+    translateInFlight = true;
     const sourceLang = targetLang === 'en' ? 'sv' : 'en';
     const sourceText = readFieldText('id_description_' + sourceLang)   // (v7.100.11) textarea på SBR;
     const sourceTitle = (document.getElementById('id_title_' + sourceLang)?.value || '').trim();
@@ -11175,6 +11193,8 @@
       }
     } catch (e) {
       vlog('Översättning: Fel — ' + e.message, 'err');
+    } finally {
+      translateInFlight = false;
     }
   }
 
@@ -11959,6 +11979,37 @@
     }
   }
 
+  // (v7.100.40) SPAR-audit: vid formulärets submit loggas dold text vs synlig editor
+  // för description-fälten — skiljer de sig sparas något annat än vad scriptet skrev
+  // till dolda fältet (widgetens eget state vinner då).
+  let submitAuditInstalled = false;
+  function installDescriptionSubmitAudit() {
+    if (submitAuditInstalled) return;
+    const el = document.getElementById('id_description_en') || document.getElementById('id_description_sv');
+    const form = el && el.closest('form');
+    if (!form) return;
+    submitAuditInstalled = true;
+    form.addEventListener('submit', () => {
+      ['id_description_en', 'id_description_sv'].forEach(id => {
+        const hiddenEl = document.getElementById(id);
+        if (!hiddenEl) return;
+        const hn = readFieldText(id).replace(/\s+/g, ' ').trim();
+        let visTxt = '';
+        if (hiddenEl.tagName === 'TEXTAREA') visTxt = hn;
+        else {
+          const wrap = hiddenEl.closest('.w-field, .w-panel, [data-field]') || hiddenEl.parentElement;
+          const ed = wrap && wrap.querySelector('.DraftEditor-root .public-DraftEditor-content');
+          if (ed) visTxt = (ed.textContent || '').replace(/\s+/g, ' ').trim();
+        }
+        const same = !visTxt || visTxt === hn;
+        vlog('SPAR-audit ' + id + ': dolt fält (' + hn.length + ' tecken): "' + hn.slice(0, 60) + '"' +
+          (visTxt && visTxt !== hn ? ' | synlig editor (' + visTxt.length + ' tecken): "' + visTxt.slice(0, 60) + '" — MISMATCH! sparar ev. gammal text' : (visTxt ? ' | synlig editor: MATCH' : ' | ingen synlig editor hittad')),
+          same ? 'ok' : 'err');
+      });
+    });
+    vlog('SPAR-audit installerad (loggar dold vs synlig description vid submit).', 'ok');
+  }
+
   function runEditPageChecks() {
     // (v7.100.15) Varje kontroll i egen try/catch: ett kast i EN kontroll
     // (t.ex. en borttagen hjälpfunktion) får ALDRIG döda hela poll-ticken —
@@ -11993,6 +12044,7 @@
     safe('linkifyInstagramHandles', linkifyInstagramHandles);   // (v7.100.34) @handle → (Instagram: [**@x**](https://www.instagram.com/x)) i description
     safe('checkFestivalCategoryMention', checkFestivalCategoryMention);   // (v7.100.36) varning om Festival-kategori utan "festival" i texten
     safe('fixCapsAndBulletsInDescriptions', fixCapsAndBulletsInDescriptions);   // (v7.100.36) VERSALER + • bort i description (EDIT)
+    safe('installDescriptionSubmitAudit', installDescriptionSubmitAudit);   // (v7.100.40) SPAR-audit vid submit
   }
 
   // ---- Samma automatik även på MAIN:s create-sida (på uttrycklig begäran,
