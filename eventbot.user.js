@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.41
+// @version      7.100.42
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -6732,6 +6732,17 @@
       const dateRange = ev.start_date
         ? (ev.end_date && ev.end_date !== ev.start_date ? ev.start_date + ' – ' + ev.end_date : ev.start_date)
         : '–';
+      // (v7.100.42) flerdagars-event: kortfattad "N dagar"-markering i kortet
+      let daysNote = '';
+      if (ev.start_date && ev.end_date && ev.end_date !== ev.start_date) {
+        const d0 = Date.parse(ev.start_date), d1 = Date.parse(ev.end_date);
+        if (isFinite(d0) && isFinite(d1) && d1 > d0) {
+          const n = Math.round((d1 - d0) / 86400000) + 1;
+          daysNote = ' · <b>' + n + ' dag' + (n === 1 ? '' : 'ar') + '</b>';
+        }
+      }
+      // (v7.100.42) besökarantal i VARJE eventkort, lokaliserat (0 om saknas)
+      const partTxt = ' · <b>' + Number(ev.participants || 0).toLocaleString('sv-SE') + '</b> deltagare';
       const badge = '<span class="vseh-badge" style="background:' + st.bg + ';color:' + st.fg + '">' + esc(st.label) + '</span>';
       const createBtn = (!passed && ev.url && ev.status === 'not_in_cal')
         ? '<button type="button" class="vseh-crm-create" data-url="' + esc(ev.url) + '">✏️ Skapa utkast</button>' : '';
@@ -6744,8 +6755,7 @@
         '<h4><span>' + esc(ev.title) + '</span>' + badge + '</h4>' +
         '<div class="m"><span class="v">' + esc(ev.venue || '–') + '</span>' +
           (ev.business_type ? ' · ' + esc(ev.business_type) : '') + '</div>' +
-        '<div class="dates"><b>' + esc(dateRange) + '</b>' +
-          (ev.participants ? ' · ' + ev.participants + ' deltagare' : '') + '</div>' +
+        '<div class="dates"><b>' + esc(dateRange) + '</b>' + daysNote + partTxt + '</div>' +
         (ev.url ? '<div class="m"><a class="vseh-edit" href="' + esc(ev.url) + '" target="_blank" rel="noopener">🔗 Länk</a></div>' : '') +
         actionsRow +
       '</div>';
