@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.44
+// @version      7.100.45
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -1954,13 +1954,19 @@
         return false;
       };
       if (!hasReactKeys()) {
-        vlog('Draftail: väntar på hydrering (inga __react*-nycklar på root/föräldrar än) — ' + fieldId + '…');
-        let waited = 0;
-        while (!hasReactKeys() && waited < 15000) { await wait(100); waited += 100; }
-        vlog(hasReactKeys()
-          ? 'Draftail: hydrering klar efter ' + waited + ' ms (' + fieldId + ') — __react*-nycklar finns nu.'
-          : 'Draftail: hydrering uteblev efter 15 s (' + fieldId + ') — går vidare ändå (reservvägen).',
-          hasReactKeys() ? 'ok' : 'warn');
+        // (v7.100.45) om dokumentsvepet EN GÅNG visat 0 fiber-nycklar på sidan
+        // finns inga props att vänta på — hoppa över 15 s-väntan.
+        if (docFiberKeyCount() === 0) {
+          vlog('Draftail: 0 fiber-nycklar i hela dokumentet (' + fieldId + ') — hoppar över hydreringsväntan (props omöjligt på denna sida).', 'warn');
+        } else {
+          vlog('Draftail: väntar på hydrering (inga __react*-nycklar på root/föräldrar än) — ' + fieldId + '…');
+          let waited = 0;
+          while (!hasReactKeys() && waited < 15000) { await wait(100); waited += 100; }
+          vlog(hasReactKeys()
+            ? 'Draftail: hydrering klar efter ' + waited + ' ms (' + fieldId + ') — __react*-nycklar finns nu.'
+            : 'Draftail: hydrering uteblev efter 15 s (' + fieldId + ') — går vidare ändå (reservvägen).',
+            hasReactKeys() ? 'ok' : 'warn');
+        }
       }
     }
     return root || null;
@@ -2127,10 +2133,54 @@
     vlog(msg, 'err');
   }
 
-  // (v7.100.38) Fält där verifierad tömning misslyckats tidigare i sessionen —
-  // inga fler delete-försök mot samma fält (poll-loopen ska inte hamra igen).
-  // Mönster som emdashDescTried. Sista utväg: draft.js-JSON direkt till dolda fältet.
-  const draftailBrokenClear = new Set();
+  // (v7.100.45) Fält där contentEditable-vägen (paste/insertText över verifierad
+  // select-all) misslyckats UTAN React-props: 1,5 s-pollern kör inga nya försök
+  // samma session (userAction=true — knapp/översättning — får alltid försöka).
+  const draftailNoAutoRetry = new Set();
+  // (v7.100.45) Intended-value-vakt för sista-utväg-JSON (dold-fältet-reserven när
+  // props saknas): senaste verifierade värde per fält. MutationObserver + lätt
+  // poll skriver tillbaka avsett värde om widgeten skriver över det (max 5 ggr),
+  // och SPAR-auditen reparerar i capture-fas före Wagtails egen submit-handler.
+  const draftailIntended = new Map();   // fieldId -> { value, repairs, iv, mo }
+  function installIntendedGuard(fieldId) {
+    const hidden = document.getElementById(fieldId);
+    if (!hidden) return;
+    let rec = draftailIntended.get(fieldId);
+    if (!rec) {
+      rec = { value: '', repairs: 0, iv: null, mo: null };
+      const repair = () => {
+        const el = document.getElementById(fieldId);
+        if (!el || (el.value || '') === rec.value) return;
+        if (rec.repairs >= 5) return;
+        rec.repairs++;
+        try { el.value = rec.value; el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+        vlog('Beskrivning: ' + fieldId + ' — dolda fältet hade skrivits över; skrev tillbaka avsett värde (reparation ' + rec.repairs + '/5).', 'warn');
+      };
+      try {
+        rec.mo = new MutationObserver(repair);
+        rec.mo.observe(hidden, { attributes: true, attributeFilter: ['value'], childList: true, characterData: true, subtree: true });
+      } catch {}
+      rec.iv = setInterval(repair, 500);   // value som property ändras inte alltid som attribute
+      draftailIntended.set(fieldId, rec);
+    }
+    rec.value = hidden.value || '';
+    rec.repairs = 0;
+  }
+  // (v7.100.45) räknas en gång per sida: antal fiber-nycklar i hela dokumentet
+  // (mountDraftail hoppar då över 15 s-hydreringsväntan när antalet är 0).
+  let vsehDocFiberKeyCount = null;
+  function docFiberKeyCount() {
+    if (vsehDocFiberKeyCount !== null) return vsehDocFiberKeyCount;
+    let n = 0, c = 0;
+    for (const el of document.querySelectorAll('*')) {
+      if (++n > 20000) break;
+      for (const k of Object.keys(el)) {
+        if (k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) { c++; break; }
+      }
+    }
+    vsehDocFiberKeyCount = c;
+    return c;
+  }
 
   // ===== STRUKTURBEVARANDE DRAFTAIL-SKRIVNING (v7.100.38, teknik portad från editorbot) =====
   // Det dolda input-fältet hålls av Draftail synkat med rå Draft.js-JSON
@@ -2276,6 +2326,12 @@
     return run;
   }
   async function updateDraftailStructuredInner(fieldId, transformFn, userAction = false) {
+    // (v7.100.45) pollern (ej userAction) gör inga nya försök på fält där
+    // contentEditable-vägen redan misslyckats utan props denna session.
+    if (!userAction && draftailNoAutoRetry.has(fieldId)) {
+      warnDraftailOnce(fieldId, 'Beskrivning: ' + fieldId + ' — contentEditable-vägen misslyckades tidigare utan props; pollern hoppar över (knappar/översättning får alltid försöka).');
+      return false;
+    }
     // (v7.100.39) Innehållsbaserad spärr: blockerar bara en skrivning vars
     // innehåll är identiskt med det senast skrivna inom 15 s (sant duplicat).
     // Ett äkta nytt innehåll (t.ex. versal/punktkuls-rättning efter en
@@ -2315,6 +2371,7 @@
       draftailWriteStamp.set(fieldId, { t: Date.now(), sig: 'J:' + newCanon });
       const root = await mountDraftail(fieldId);
       const props = root && getDraftProps(root);
+      if (props) draftailNoAutoRetry.delete(fieldId);   // (v7.100.45) props finns — nollställ ev. spärr
       if (props) {
         try {
           const EditorState = props.editorState.constructor;
@@ -2337,23 +2394,26 @@
       } else {
         vlog('Beskrivning: inga React-props för ' + fieldId + ' — försöker contentEditable-paste först (bara dolda fältet skrivs annars över av widgetens state vid render/spar).', 'warn');
       }
-      // (v7.100.40) contentEditable-reserv FÖRE dolda-fältet-reserven: när props saknas
-      // (eller props.onChange inte verifieras inom 5 s) måste texten in GENOM editorn —
-      // annars skriver Draftail över det dolda fältet från sitt eget (gamla) state vid
-      // nästa render/spar och ändringen försvinner vid omladdning. Verifierad
-      // select-all + töm + paste; platt text (struktur/länkar bevaras bara via props-
-      // vägen ovan). Dolda-fältet-JSON kvar som sista utväg.
-      if (root && await updateDraftailViaClipboard(fieldId, newPreview)) {
-        if (!draftailBrokenClear.has(fieldId) && draftailTextLanded(fieldId, newPreview)) {
-          vlog(`Beskrivning strukturerad via contentEditable-paste: ${fieldId} — widgeten synkade själv dolda fältet (verifierad på textnivå).`, 'ok');
+      // (v7.100.40/v7.100.45) contentEditable-reserv FÖRE dolda-fältet-reserven (nu
+      // icke-destruktiv: paste/insertText över verifierad select-all, ingen tömning).
+      // Misslyckas den utan props markeras fältet så pollern inte kör nya försök.
+      let clipboardOk = false;
+      if (root) {
+        clipboardOk = await updateDraftailViaClipboard(fieldId, newPreview);
+        if (clipboardOk && draftailTextLanded(fieldId, newPreview)) {
+          vlog(`Beskrivning strukturerad via contentEditable (paste/insertText): ${fieldId} — widgeten synkade själv dolda fältet (verifierad på textnivå).`, 'ok');
           await refreshDraftailScreen(fieldId, root, getDraftProps(root));
           return true;
         }
-        vlog('Beskrivning: paste ej verifierad eller fältet "broken" (' + fieldId + ') — går vidare till dolda-fältet-reserv.', 'warn');
+      }
+      if (!props && !userAction && !clipboardOk) {
+        draftailNoAutoRetry.add(fieldId);
+        warnDraftailOnce(fieldId, 'Beskrivning: ' + fieldId + ' — contentEditable-vägen misslyckades utan React-props; 1,5 s-pollern försöker inte igen denna session (knappar/översättning får alltid försöka).');
       }
       vlog('Beskrivning: sista utväg — JSON direkt till dolda fältet (' + fieldId + '). OBS: synliga editorn uppdateras inte; om widgeten renderar om före spar kan den skriva över värdet.', 'warn');
       const ok = await guardDraftailWrite(fieldId, newContent);
       if (ok && draftailJSONLanded(fieldId, newContent)) {
+        if (!props) installIntendedGuard(fieldId);   // (v7.100.45) intended-value-vakt
         vlog(`Beskrivning strukturerad via dolda fältet (reserv): ${fieldId} — verifierad på JSON-nivå (men ej i synliga editorn).`, 'ok');
         await refreshDraftailScreen(fieldId, root, null);
         return true;
@@ -2427,23 +2487,76 @@
       return cur && cur.replace(/\s+/g, ' ').trim() === String(text).replace(/\s+/g, ' ').trim();
     } catch { return false; }
   }
+  // (v7.100.45) ICKE-DESTRUKTIV contentEditable-väg: ingen tömning alls. Med
+  // verifierad select-all ERSÄTTER paste/insertText hela innehållet, så ingen
+  // delete behövs och DOM/state kan aldrig gå isär av en tömning.
+  // Diagnostik legacy-sidan (v7.100.43): 0 fiber-nycklar i dokumentet → props
+  // omöjligt där; execCommand('insertText') över select-all synkar dolda fältet
+  // direkt; syntetisk paste landar INTE där. Därför alltid båda försöken.
   async function updateDraftailViaClipboard(fieldId, text) {
     const root = await mountDraftail(fieldId);
     const editable = root && (root.querySelector('.public-DraftEditor-content') || root);
     if (!editable || !editable.isContentEditable) return false;
-    // (v7.100.38) Fältet kunde inte tömmas verifierat tidigare i sessionen —
-    // inga fler delete-försök (poll-loopen ska inte hamra); gå direkt till
-    // sista utväg: draft.js-JSON rakt ner i dolda fältet.
-    if (draftailBrokenClear.has(fieldId)) {
-      vlog('Beskrivning: ' + fieldId + ' är markerad "broken" (kunde inte tömmas tidigare) — hoppar över select-all/delete/paste och skriver JSON direkt till dolda fältet.', 'err');
-      return await writeDraftailTextJSON(fieldId, text);
-    }
-    // (v7.100.17) Spara originaltexten INNAN vi rör fältet — om tömningen lyckas
-    // men paste sedan misslyckas (t.ex. Firefox där syntetisk clipboardData kan
-    // bli tom) är fältet tomt i React-state och skulle sparas tomt. Då återställer
-    // vi originalet direkt via restoreOriginal() innan vi ger upp.
     const originalText = readDraftailText(fieldId);
-    const restoreOriginal = async (allowPaste) => {
+    const normT = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+    // select-all via Selection-API (+ execCommand('selectAll') som reserv),
+    // verifierad mot hela innehållet — utan full täckning avbryts skrivningen.
+    const selectAllVerified = () => {
+      const fullTextLen = normT(editable.textContent).length;
+      let selectedLen = 0;
+      try {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editable);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        selectedLen = normT(sel.toString()).length;
+        if (selectedLen < fullTextLen) {
+          try { document.execCommand('selectAll'); } catch {}
+          selectedLen = normT(sel.toString()).length;
+        }
+      } catch {}
+      return { ok: selectedLen >= fullTextLen, selectedLen, fullTextLen };
+    };
+    const waitLandedFor = async (payload) => {
+      for (let i = 0; i < 50; i++) { await wait(100); if (draftailTextLanded(fieldId, payload)) return true; }
+      return false;
+    };
+    // Försök 1: syntetisk paste — clipboardData ALLTID via defineProperty
+    // (Firefox ignorerar konstruktorn på syntetiska events → tom paste).
+    const tryPaste = async (payload) => {
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', payload);
+        const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+        try { Object.defineProperty(ev, 'clipboardData', { value: dt }); } catch {}
+        editable.dispatchEvent(ev);
+      } catch {}
+      return await waitLandedFor(payload);
+    };
+    // Försök 2 (viktigast på legacy-sidor utan fiber-nycklar):
+    // execCommand('insertText') över verifierad select-all — ersätter ALLT,
+    // kan aldrig duplicera.
+    const tryInsertText = async (payload) => {
+      let ok = false;
+      try { ok = document.execCommand('insertText', false, payload); } catch { ok = false; }
+      if (!ok) return false;
+      return await waitLandedFor(payload);
+    };
+    // Båda försöken över en NY select-all.
+    const attemptReplace = async (payload) => {
+      const sel = selectAllVerified();
+      if (!sel.ok) {
+        vlog('Beskrivning: AVBRYTER skrivning till ' + fieldId + ' — select-all täckte inte hela fältet (' + sel.selectedLen + '/' + sel.fullTextLen + ' tecken). Klistra in manuellt.', 'err');
+        return false;
+      }
+      if (await tryPaste(payload)) return true;
+      selectAllVerified();   // paste kan ha flyttat caret — bygg om markeringen
+      if (await tryInsertText(payload)) return true;
+      return false;
+    };
+    // Återställ original över select-all (aldrig tömma först); props-väg först.
+    const restoreOriginal = async () => {
       if (!originalText) return;
       try {
         const props = root && getDraftProps(root);
@@ -2453,276 +2566,45 @@
           let ns = EditorState.createWithContent(ContentState.createFromText(originalText, "\n"));
           if (typeof EditorState.moveSelectionToEnd === "function") ns = EditorState.moveSelectionToEnd(ns);
           props.onChange(ns);
-          for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 100)); if (draftailTextLanded(fieldId, originalText)) return; }
+          for (let i = 0; i < 50; i++) { await wait(100); if (draftailTextLanded(fieldId, originalText)) return; }
         }
       } catch {}
-      // (v7.100.19) paste är säker när fältet är tomt ELLER när aktuell
-      // markering täcker (nästan) hela originaltexten — annars skulle den kunna
-      // läggas till bredvid och duplicera.
-      let selLen = 0;
-      try { selLen = (window.getSelection().toString() || '').replace(/\s+/g, ' ').trim().length; } catch {}
-      // (v7.100.31) klistra ALDRIG in i ett icke-tomt state — då läggs texten
-      // bredvid vad som än ligger där (duplicering). Paste bara om det dolda
-      // fältet verifierat är TOMT, eller markeringen täcker (nästan) hela det
-      // innehåll som faktiskt ligger i state just nu.
-      const hiddenLen = hiddenNorm().length;
-      if (!(hiddenLen === 0 || (selLen > 0 && selLen >= hiddenLen * 0.9))) return;
-      try {
-        const dt2 = new DataTransfer();
-        dt2.setData('text/plain', originalText);
-        // (v7.100.43) clipboardData ALLTID via defineProperty — Firefox ignorerar
-        // clipboardData i konstruktorn på syntetiska paste-events (tom paste).
-        const pasteEv2 = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
-        try { Object.defineProperty(pasteEv2, 'clipboardData', { value: dt2 }); } catch {}
-        editable.dispatchEvent(pasteEv2);
-        for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 100)); if (draftailTextLanded(fieldId, originalText)) return; }
-      } catch {}
+      await attemptReplace(originalText);
     };
     editable.focus();
-    // Rensa först: markera HELA befintliga innehållet så paste
-    // ERSÄTTER den gamla texten i stället för att lägga den nya bredvid/
-    // efter den (bekräftat 2026-10-09: utan markering kunde den ursprungliga
-    // descriptionen bli kvar när paste landade vid markörens position).
-    // Räkna aldrig med execCommand här — bygg markeringen med Selection-API:t
-    // så den fungerar även om execCommand selectAll ignoreras.
-    // (2026-10-20, v7.100.4) VERIFIERAD SELECT-ALL: en obekräftad markering
-    // kunde misslyckas tyst (Draft.js återställer caret vid fokus/render) —
-    // paste satte då in texten VID MARKÖREN och duplicerade innehållet.
-    // Em-dash-rensningens 1,5s-poll läste samma em-dash igen (originalet var
-    // kvar) och körde var 15:e sekund → fältet växte 2^n tills fliken
-    // stängdes. Nu: efter markering kontrolleras att selection faktiskt
-    // täcker hela innehållet; om inte provas execCommand('selectAll') som
-    // reserv och kontrolleras igen. Täcker den fortfarande inte hela
-    // innehållet AVBRYTS skrivningen helt (ingen paste alls) — ett tydligt
-    // misslyckande i loggen är bättre än en duplicering som förstörs
-    // när användaren sparar.
-    const fullTextLen = (editable.textContent || '').replace(/\s+/g, ' ').trim().length;
-    let selectedLen = 0;
-    try {
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editable);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      selectedLen = (sel.toString() || '').replace(/\s+/g, ' ').trim().length;
-      if (selectedLen < fullTextLen) {
-        // Reserv: vissa Draft.js-versioner lyssnar bara på execCommand.
-        try { document.execCommand('selectAll'); } catch {}
-        selectedLen = (sel.toString() || '').replace(/\s+/g, ' ').trim().length;
-      }
-    } catch {}
-    if (selectedLen < fullTextLen) {
-      vlog('Beskrivning: AVBRYTER skrivning till ' + fieldId +
-        ' — select-all täckte inte hela fältet (' + selectedLen + '/' + fullTextLen +
-        ' tecken) och en paste skulle duplicera innehållet. Klistra in manuellt.', 'err');
-      return false;
-    }
-    // (2026-10-20, v7.100.5) TÖM FÄLTET FÖRST — garanterad ersättning, aldrig
-    // tillägg: även när select-all VERIFIERAS täcka hela innehållet har paste
-    // ibland landat bredvid markören i stället för att ersätta den (bekräftat
-    // av användaren: originaltexten blev kvar både vid em-dash-rensning och
-    // vid Mistral-omskrivning). Tvåsteg nu: (1) ta bort hela markeringen via
-    // ett riktigt delete-händelsepar (keydown Delete + beforeinput +
-    // input) — Draftails egen tangentbords-hantering tömmer då EditorState
-    // korrekt; verifiera att fältet är tomt (upp till 2 s). (2) först när
-    // fältet är verifierat tomt körs paste — den kan då aldrig lägga till,
-    // bara fylla ett tomt fält. Om tömningen inte verifieras avbryts hela
-    // skrivningen (ingen paste alls) — ett tydligt misslyckande är bättre
-    // än duplicerad text.
-    // (v7.100.31) waitEmpty kontrollerar nu det DOLDA fältet (React-state = facit
-    // som sparas), inte bara skärmens DOM-text: efter textContent-nödpatchen kan
-    // DOM och state ha gått isär — DOM tom men state med gammal text gav falskt
-    // "tomt", och paste lade då till bredvid → duplicerad description.
-    const hiddenNorm = () => readDraftailText(fieldId).replace(/\s+/g, ' ').trim();
-    const waitEmpty = async () => {
+    // (v7.100.45) Hela tömningssekvensen (delete-events + execCommand('delete') +
+    // waitEmpty + broken-markering) är BORTTAGEN — ersätts av attemptReplace ovan.
+    // (v7.100.45) Ersätt över verifierad select-all: paste först, sedan
+    // insertText (legacy). Misslyckas båda → avbryt UTAN att röra dolda fältet,
+    // återställ originalet över select-all.
+    if (await attemptReplace(String(text))) {
+      // skärm-kontroll: vänta tills synlig text matchar; annars riktig re-render
+      const wantS = normT(text);
       for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        if (!hiddenNorm()) return true;   // state verifierat tom — paste kan inte duplicera
-      }
-      return false;
-    };
-    let emptied = false;
-    try {
-      editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
-      editable.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
-      editable.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
-      editable.dispatchEvent(new KeyboardEvent('keyup', { key: 'Delete', bubbles: true, cancelable: true }));
-      emptied = await waitEmpty();
-    } catch {}
-    if (!emptied) {
-      // Reserv: selection fortfarande satt — prova execCommand('delete').
-      try {
-        document.execCommand('delete');
-        emptied = await waitEmpty();
-      } catch {}
-    }
-    if (!emptied) {
-      // (v7.100.19) andra försök: bygg om markeringen från innehållet och prova igen
-      try {
-        const sel = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(editable);
-        sel.removeAllRanges(); sel.addRange(range);
-        document.execCommand('delete');
-        emptied = await waitEmpty();
-      } catch {}
-    }
-    // (v7.100.43) fjärde tömningsförsöket (direkt borttagning av DOM-noder via
-    // removeChild + beforeinput/input) är BORTTAGET: Draft.js är en kontrollerad
-    // komponent och direkta DOM-borttagningar desynkar DOM från state — det var
-    // orsaken till att skärmen kunde tömmas direkt efter en auto-rättning.
-    // draftailBrokenClear-logiken nedanför behålls oförändrad.
-    if (!emptied) {
-      // (v7.100.38) markera "broken": inga fler delete-försök mot detta fält
-      // denna session (se början av funktionen). Sista utväg först: skriva
-      // draft.js-JSON direkt till dolda fältet — garanterat det som sparas.
-      draftailBrokenClear.add(fieldId);
-      vlog('Beskrivning: AVBRYTER tömning av ' + fieldId + ' — kunde inte tömmas verifierat; markerar fältet "broken" för sessionen. Sista utväg: JSON direkt till dolda fältet.', 'err');
-      if (await writeDraftailTextJSON(fieldId, text)) return true;
-      await restoreOriginal(false);   // (v7.100.17) delete-event hann delvis mutera fältet — återställ
-      vlog('Beskrivning: AVBRYTER skrivning till ' + fieldId +
-        ' — fältet kunde inte tömmas verifierat (innehåll kvar efter delete) och en paste skulle duplicera texten. Original återställt via React-props om möjligt, annars klistra in manuellt.', 'err');
-      return false;
-    }
-    // Draft.js är en kontrollerad React-komponent: råa DOM-ändringar den inte
-    // själv sanktionerat (t.ex. execCommand insertText) accepteras till synes,
-    // men internal EditorState uppdateras inte — vid nästa tangenttryckning
-    // "återställer" Draft.js DOM:en och fältet känns låst tills sidan laddas
-    // om (bekräftat 2026-10-05). En riktig paste-händelse går istället genom
-    // Draftails egen paste-hantering, som uppdaterar React-state korrekt —
-    // fältet förblir redigerbart. Firefox ersätter dock clipboardData i
-    // syntetiska events med tom data, så paste kan MISSLYCKAS TYST (bekräftat
-    // 2026-10-05: "Fåglarna"-eventet fick helt tomma beskrivningsfält). Därför
-    // verifieras varje metod mot det dolda fältet, och den sista reserven
-    // skriver Draft.js-JSON direkt — synkat men oredigerbart-nästa-tangent är
-    // fortfarande bättre än ett tomt fält, och användaren varnas i loggen.
-    // EN metod i taget med ordentlig verifiering (v7.97.9). Buggen 2026-10-06:
-    // paste-händelsen landar i React-state, men synken till det dolda fältet
-    // hann inte inom 150 ms — skriptet trodde att den misslyckades och staplade
-    // execCommand + direkt JSON-skrivning ovanpå. Dubbelskrivningarna skapade
-    // en kapplöpning där React till slut återställde fältet till sitt eget
-    // ( ursprungliga) state — därför kom originaltexten tillbaka i sv-fältet.
-    // Nu: polla det dolda fältet per metod och gå bara vidare till nästa metod
-    // om den verkligen inte landade. (2026-10-20, v7.100.4) Väntan höjd från
-    // 1,5 s till 5 s — synken Draftail→dolt fält hann ibland inte inom 1,5 s
-    // på långsamma sidor, vilket gav falska negativ i verifieringen (och
-    // tidigare, när fler metoder staplades, dubbelskrivningar).
-    // (2026-10-20, v7.100.5) Paste körs nu mot ett VERIFIERAT TOMT fält (se
-    // tömningen ovan) — ersättning är garanterad, aldrig tillägg.
-    const waitLanded = async () => {
-      for (let i = 0; i < 50; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        if (draftailTextLanded(fieldId, text)) return true;
-      }
-      return false;
-    };
-    try {
-      const dt = new DataTransfer();
-      dt.setData('text/plain', String(text));
-      // (v7.100.43) clipboardData via defineProperty (se ovan).
-      const pasteEv = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
-      try { Object.defineProperty(pasteEv, 'clipboardData', { value: dt }); } catch {}
-      editable.dispatchEvent(pasteEv);
-    } catch {}
-    // (2026-10-19) execCommand-insertText-steget är BORTTAGET: när paste
-    // landat visuellt men verifieringen mot det dolda fältet misslyckats
-    // (split-brain, synken hann inte inom 1,5 s) lade steget texten Ovanpå
-    // igen — och utan full selectAll-täckning duplicerades innehållet i
-    // fältet. Det var roten till att description "klistrades in gång på
-    // gång" på edit-sidor. EN metod, EN gång — misslyckas verifieringen
-    // lämnas fältet orört (paste kan i värsta fall ha landat synligt,
-    // men aldrig dubblerat).
-    if (await waitLanded()) {
-      // (v7.100.18) även SKÄRMEN måste visa texten — annars ser fältet tomt ut
-      // tills sparning även när dolda fältet är rätt. Vänta kort; vid mismatch
-      // tvinga re-render via riktig focus() (DraftEditor bygger om DOM från
-      // state) + forceSelection via props om de går att hitta.
-      const wantS = String(text).replace(/\s+/g, ' ').trim();
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        const shown = (editable.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!wantS || shown === wantS) break;
+        await wait(100);
+        if (!wantS || normT(editable.textContent) === wantS) break;
         if (i === 19) {
           try {
             const props2 = getDraftProps(root);
             if (props2) {
               const ES2 = props2.editorState.constructor;
-              const CS2 = props2.editorState.getCurrentContent().constructor;
               editable.focus();
-              // först bara tvinga re-render av befintlig state (forceSelection)
               props2.onChange(ES2.forceSelection(props2.editorState, props2.editorState.getSelection().set('hasFocus', true)));
-              await new Promise(r => setTimeout(r, 1000));
-              const shown2 = (editable.textContent || '').replace(/\s+/g, ' ').trim();
-              if (wantS && shown2 !== wantS) {
-                // state hade inte texten — skriv om via props direkt
-                let ns2 = ES2.createWithContent(CS2.createFromText(String(text), "\n"));
-                if (typeof ES2.moveSelectionToEnd === 'function') ns2 = ES2.moveSelectionToEnd(ns2);
-                props2.onChange(ns2);
-              }
-            } else {
-              editable.blur(); editable.focus();
-            }
+              await wait(1000);
+            } else { editable.blur(); editable.focus(); }
           } catch {}
           vlog('Beskrivning: ' + fieldId + ' rätt i dolda fältet men skärmen visade inte texten — tvingade re-render (fokus/forceSelection).', 'err');
         }
       }
-      {
-        // (v7.100.38) INGEN textContent-patch längre — den desynkar DOM från
-        // Draft.js state (orsaken till "statiska"/låsta fält). Dolda fältet är
-        // rätt (det sparas); vid skärm-mismatch försök riktig re-render, annars
-        // lämna DOM orörd och logga.
-        const shownNow = (editable.textContent || '').replace(/\s+/g, ' ').trim();
-        if (wantS && shownNow !== wantS) {
-          await refreshDraftailScreen(fieldId, root, getDraftProps(root));
-        }
+      if (wantS && normT(editable.textContent) !== wantS) {
+        await refreshDraftailScreen(fieldId, root, getDraftProps(root));
       }
       return true;
     }
-    // (v7.100.31) paste verifierades inte exakt — om state ändå innehåller text
-    // (t.ex. gammal + ny sammanfogad efter DOM/state-desync) görs ETT rensat
-    // återförsök: töm verifierat (dolt fält tomt) + klistra en gång till, bara
-    // exakt likhet accepteras. Misslyckas det återställs originalet — aldrig en
-    // okontrollerad andra paste ovanpå.
-    const hiddenAfter = hiddenNorm();
-    const wantNorm = String(text).replace(/\s+/g, ' ').trim();
-    if (hiddenAfter && hiddenAfter !== wantNorm) {
-      vlog('Beskrivning: ' + fieldId + ' innehåller oväntad text efter paste (' + hiddenAfter.length +
-        ' tecken) — gör ett rensat återförsök (töm verifierat + klistra igen).', 'err');
-      try {
-        editable.focus();
-        const sel2 = window.getSelection();
-        const range2 = document.createRange();
-        range2.selectNodeContents(editable);
-        sel2.removeAllRanges(); sel2.addRange(range2);
-        editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
-        editable.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
-        editable.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
-        if (!await waitEmpty()) { try { document.execCommand('delete'); } catch {} await waitEmpty(); }
-      } catch {}
-      if (await waitEmpty()) {
-        try {
-          const dtR = new DataTransfer();
-          dtR.setData('text/plain', String(text));
-          // (v7.100.43) clipboardData via defineProperty (se ovan).
-          const pasteEvR = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
-          try { Object.defineProperty(pasteEvR, 'clipboardData', { value: dtR }); } catch {}
-          editable.dispatchEvent(pasteEvR);
-        } catch {}
-        if (await waitLanded()) {
-          vlog('Beskrivning: återförsök lyckades — ' + fieldId + ' är nu exakt den nya texten.', 'ok');
-          return true;
-        }
-      }
-    }
-    // (v7.100.17) Paste landade INTE — fältet är verifierat TOMT i React-state just
-    // nu, så en sparning skulle radera hela beskrivningen. Återställ
-    // originaltexten direkt (React-props först, andra paste som reserv).
-    await restoreOriginal(true);
+    await restoreOriginal();
     const restored = originalText ? draftailTextLanded(fieldId, originalText) : false;
-    warnDraftailOnce(fieldId, 'Beskrivning: kunde INTE skriva till ' + fieldId +
-      ' automatiskt (paste verifierades inte) — ' + (restored ? 'originaltexten är återställd.' : 'ÅTERSTÄLLNING misslyckades också — fältet kan vara tomt, klistra in manuellt!'));
-    vlog('Beskrivning: AUTOMATISK IFYLLNING MISSLYCKADES för ' + fieldId + ' — ' +
-      (restored ? 'originaltexten återställd (ingen data förlorad).' : 'kunde inte återställa — fältet kan vara tomt, klistra in manuellt!'), 'err');
+    warnDraftailOnce(fieldId, 'Beskrivning: kunde INTE skriva till ' + fieldId + ' automatiskt (paste + insertText verifierades inte över select-all) — ' + (restored ? 'originaltexten är återställd.' : 'klistra in manuellt!'));
+    vlog('Beskrivning: AUTOMATISK IFYLLNING MISSLYCKADES för ' + fieldId + ' — dolda fältet ORÖRT (icke-destruktiv väg, ingen tömning).', 'err');
     return false;
   }
   // (2026-10-19) Tidsbaserad skrivspärr per fält: på edit-sidor skrivs
@@ -2786,10 +2668,15 @@
         const reactKeys = root ? Object.keys(root).filter(k => k.startsWith('__react')).join(',') : '?';
         const nRoots = root && root.parentElement ? root.parentElement.querySelectorAll('.DraftEditor-root').length : '?';
         warnDraftailOnce(fieldId, `Beskrivning: hittade Draftail-fältet ${fieldId} men inte dess React-props — provar reservsökvägen (contentEditable). Diagnostik: root __react-nycklar=[${reactKeys || 'inga'}], isConnected=${root ? root.isConnected : '?'}, antal .DraftEditor-root i parent=${nRoots}.`);
+        if (!userAction && draftailNoAutoRetry.has(fieldId)) {   // (v7.100.45)
+          warnDraftailOnce(fieldId, `Beskrivning: ${fieldId} — contentEditable misslyckades tidigare utan props; pollern hoppar över (userAction försöker alltid).`);
+          return false;
+        }
         if (await updateDraftailViaClipboard(fieldId, text)) {
           vlog(`Beskrivning ifylld (contentEditable-reserv): ${fieldId} → ${String(text).slice(0, 60)}...`, 'ok');
           return true;
         }
+        if (!userAction) draftailNoAutoRetry.add(fieldId);   // (v7.100.45)
         warnDraftailOnce(fieldId, `Beskrivning: kunde inte skriva till ${fieldId} — varken React-props eller contentEditable-reserv fungerade.`);
         return false;
       }
@@ -12084,6 +11971,20 @@
     const form = el && el.closest('form');
     if (!form) return;
     submitAuditInstalled = true;
+    // (v7.100.45) intended-value-reparation i CAPTURE-fas, före Wagtails egen
+    // submit-handler: om dolda fältet då skiljer sig från avsett värde skrivs
+    // avsett värde tillbaka innan sparningen går iväg.
+    form.addEventListener('submit', () => {
+      ['id_description_en', 'id_description_sv'].forEach(id => {
+        const rec = draftailIntended.get(id);
+        const el = document.getElementById(id);
+        if (rec && el && (el.value || '') !== rec.value) {
+          try { el.value = rec.value; el.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+          vlog('SPAR-audit: reparerade dolt fält före spar — ' + id + ' hade skrivits över; återställde avsett värde.', 'err');
+          rec.repairs++;
+        }
+      });
+    }, true);
     form.addEventListener('submit', () => {
       ['id_description_en', 'id_description_sv'].forEach(id => {
         const hiddenEl = document.getElementById(id);
@@ -12101,8 +12002,8 @@
           (visTxt && visTxt !== hn ? ' | synlig editor (' + visTxt.length + ' tecken): "' + visTxt.slice(0, 60) + '" — MISMATCH! sparar ev. gammal text' : (visTxt ? ' | synlig editor: MATCH' : ' | ingen synlig editor hittad')),
           same ? 'ok' : 'err');
       });
-    });
-    vlog('SPAR-audit installerad (loggar dold vs synlig description vid submit).', 'ok');
+    }, true);   // (v7.100.45) capture — före Wagtails handler, efter reparationslyssnaren ovan
+    vlog('SPAR-audit installerad (capture: reparerar avsett värde + loggar dold vs synlig description vid submit).', 'ok');
   }
 
   function runEditPageChecks() {
