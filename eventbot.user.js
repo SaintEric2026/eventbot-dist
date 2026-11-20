@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.42
+// @version      7.100.43
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -1937,10 +1937,19 @@
       // kommer senare. getDraftProps skulle då missa allt och skriva via
       // contentEditable-reserven. Vänta upp till 15 s (100 ms-intervall) tills
       // nycklarna dyker upp innan vi går vidare.
+      // (v7.100.43) dokumentsvid kontroll: räkna __react*-nycklar i hela
+      // dokumentet (fiber-nycklar kan ligga på ättlingar, t.ex.
+      // .public-DraftEditor-content), inte bara root + 40 föräldrar — annars
+      // väntar vi 15 s i onödan när nycklar finns på ättlingar.
       const hasReactKeys = () => {
         for (let p = root, i = 0; p && i < 40; i++) {
           if (Object.keys(p).some(k => k.startsWith('__react'))) return true;
           p = p.parentElement;
+        }
+        let n = 0;
+        for (const el of document.querySelectorAll('*')) {
+          if (++n > 20000) break;
+          if (Object.keys(el).some(k => k.startsWith('__react'))) return true;
         }
         return false;
       };
@@ -2046,6 +2055,42 @@
       if (++docN > 20000) break;
       hit = scan(el);
       if (hit) return hit;
+    }
+    // (v7.100.43) Dokumentsvepande fiber-sökning (inkl. shadow roots): på legacy
+    // React 16 ligger fiber-nyckeln (__reactInternalInstance$) ofta på ÄTTLINGAR
+    // med händelsehanterare (t.ex. .public-DraftEditor-content), inte på root
+    // eller föräldrar. Svep därför hela dokumentet efter fiber-nycklar och
+    // fiber-vandra uppåt (max 200 hopp, memoizedProps + _currentElement.props)
+    // från VARJE nod med sådan nyckel.
+    {
+      const allEls = [];
+      const collect = (rn) => {
+        if (allEls.length >= 20000) return;
+        for (const el of rn.querySelectorAll('*')) {
+          allEls.push(el);
+          if (el.shadowRoot) collect(el.shadowRoot);
+        }
+      };
+      collect(document);
+      const fiberEls = [];
+      let firstKey = '';
+      for (const el of allEls) {
+        const instKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (!instKey) continue;
+        if (!firstKey) firstKey = instKey.slice(0, 26) + ' på <' + el.tagName.toLowerCase() + (el.className ? ' class="' + String(el.className).slice(0, 40) + '">' : '>');
+        fiberEls.push([el, instKey]);
+      }
+      vlog('Draftail: dokumentsvep — ' + fiberEls.length + ' fiber-nycklar av ' + allEls.length + ' noder' + (firstKey ? ' (första: ' + firstKey + ')' : ''), fiberEls.length ? 'ok' : 'warn');
+      for (const [el, instKey] of fiberEls) {
+        let node = el[instKey], hops = 0;
+        while (node && hops < 200) {
+          const fhit = (node.memoizedProps && okProps(node.memoizedProps, instKey + '.memoizedProps'))
+            || (node._currentElement && node._currentElement.props && okProps(node._currentElement.props, instKey + '._currentElement.props'));
+          if (fhit) { vlog('Draftail: React-props hittade via dokumentsvep (fiber-vandring): ' + fhit.src, 'ok'); return fhit; }
+          node = node.return || node._debugOwner || null;
+          hops++;
+        }
+      }
     }
     // (v7.100.37) React-root NEDÅT: __reactContainer$ på någon förälder (t.ex. body
     // när editorn renderas i en portal utanför formuläret) → DFS över hela
@@ -2425,7 +2470,11 @@
       try {
         const dt2 = new DataTransfer();
         dt2.setData('text/plain', originalText);
-        editable.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt2, bubbles: true, cancelable: true }));
+        // (v7.100.43) clipboardData ALLTID via defineProperty — Firefox ignorerar
+        // clipboardData i konstruktorn på syntetiska paste-events (tom paste).
+        const pasteEv2 = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+        try { Object.defineProperty(pasteEv2, 'clipboardData', { value: dt2 }); } catch {}
+        editable.dispatchEvent(pasteEv2);
         for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 100)); if (draftailTextLanded(fieldId, originalText)) return; }
       } catch {}
     };
@@ -2518,18 +2567,11 @@
         emptied = await waitEmpty();
       } catch {}
     }
-    if (!emptied) {
-      // (v7.100.31) fjärde försök: rensa DOM-noderna direkt + beforeinput/input —
-      // vissa Draft.js-builds synkar state från DOM vid input när tangentbords-
-      // vägen inte tog (särskilt efter textContent-patch där DOM/state gått isär).
-      try {
-        editable.focus();
-        while (editable.firstChild) editable.removeChild(editable.firstChild);
-        editable.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
-        editable.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
-        emptied = await waitEmpty();
-      } catch {}
-    }
+    // (v7.100.43) fjärde tömningsförsöket (direkt borttagning av DOM-noder via
+    // removeChild + beforeinput/input) är BORTTAGET: Draft.js är en kontrollerad
+    // komponent och direkta DOM-borttagningar desynkar DOM från state — det var
+    // orsaken till att skärmen kunde tömmas direkt efter en auto-rättning.
+    // draftailBrokenClear-logiken nedanför behålls oförändrad.
     if (!emptied) {
       // (v7.100.38) markera "broken": inga fler delete-försök mot detta fält
       // denna session (se början av funktionen). Sista utväg först: skriva
@@ -2577,7 +2619,10 @@
     try {
       const dt = new DataTransfer();
       dt.setData('text/plain', String(text));
-      editable.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      // (v7.100.43) clipboardData via defineProperty (se ovan).
+      const pasteEv = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+      try { Object.defineProperty(pasteEv, 'clipboardData', { value: dt }); } catch {}
+      editable.dispatchEvent(pasteEv);
     } catch {}
     // (2026-10-19) execCommand-insertText-steget är BORTTAGET: när paste
     // landat visuellt men verifieringen mot det dolda fältet misslyckats
@@ -2658,7 +2703,10 @@
         try {
           const dtR = new DataTransfer();
           dtR.setData('text/plain', String(text));
-          editable.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dtR, bubbles: true, cancelable: true }));
+          // (v7.100.43) clipboardData via defineProperty (se ovan).
+          const pasteEvR = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+          try { Object.defineProperty(pasteEvR, 'clipboardData', { value: dtR }); } catch {}
+          editable.dispatchEvent(pasteEvR);
         } catch {}
         if (await waitLanded()) {
           vlog('Beskrivning: återförsök lyckades — ' + fieldId + ' är nu exakt den nya texten.', 'ok');
