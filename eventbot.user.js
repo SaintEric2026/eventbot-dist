@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.40
+// @version      7.100.41
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -11327,23 +11327,48 @@
       vlog('EventEdit: "Biggest events"-spärr släppt — besäkarantal ifyllt eller guiden borttagen.', 'ok');
     }
   }
-  function checkBiggestEventsAttendeesGate() {
-    if (location.hostname === 'www.stockholmbusinessregion.se') return;   // SBR har inga guider
-    installBiggestGateSubmitGuard();
-    const attendeesEl = sbrFindField(['id_expected_attendees'], /besök|besok|attendee|visitor/i);
-    const tagged = biggestEventsGuideTagged();
-    const filled = !!(attendeesEl && (attendeesEl.value || '').trim());
-    const block = tagged && !!attendeesEl && !filled;
-    setBiggestGate(block);
-    if (!attendeesEl) return;
-    const noteHtml = block
-      ? '<div style="color:#c02626;font-weight:600;">\ud83d\udeab Spara är spärrad tills <b>besækarantal</b> är ifyllt — eventet är taggat i guiden "De största evenemangen i Stockholm" / "The biggest Stockholm events".</div>'
-      : '';
-    const key = block ? 'block:' + (attendeesEl.id || 'label') : 'clear';
-    if (key !== biggestGateNote) {
-      biggestGateNote = key;
-      setFieldNote(attendeesEl, 'biggestgate', noteHtml);
-    }
+  async function checkBiggestEventsAttendeesGate() {
+    try {
+      if (location.hostname === 'www.stockholmbusinessregion.se') return;   // SBR har inga guider
+      installBiggestGateSubmitGuard();
+      const attendeesEl = sbrFindField(['id_expected_attendees'], /besök|besok|attendee|visitor/i);
+      const tagged = biggestEventsGuideTagged();
+      const filled = !!(attendeesEl && (attendeesEl.value || '').trim());
+      // (v7.100.41) Om besöksantal redan finns i SBR:s CRM-import (samma matchning
+      // som CMS-export-popupen) räknas det som ifyllt — spärren ska då INTE låsa
+      // spara även när fältet på sidan står tomt.
+      let crmHit = null;
+      if (tagged && attendeesEl && !filled) {
+        try {
+          const titleEn = (document.getElementById('id_title_en')?.value || '').trim();
+          const titleSv = (document.getElementById('id_title_sv')?.value || '').trim();
+          const crm = await loadCmsExportCrm();
+          if (crm.length) {
+            const vd = [...new Set(currentDateBlocksWithTimes().map(b => parseSwedishDate(b.date) || b.date).filter(Boolean))];
+            const m = findBestCrmMatch(crm, titleEn, titleSv, vd);
+            if (m && Number(m.participants) > 0) crmHit = m;
+          }
+        } catch (e) { vlog('Biggest-gate: CRM-kontroll kastade: ' + (e && e.message ? e.message : e), 'err'); }
+      }
+      const block = tagged && !!attendeesEl && !filled && !crmHit;
+      setBiggestGate(block);
+      if (!attendeesEl) return;
+      let noteHtml = '';
+      let key = 'clear';
+      if (block) {
+        noteHtml = '<div style="color:#c02626;font-weight:600;">\ud83d\udeab Spara är spärrad tills <b>besökarantal</b> är ifyllt — eventet är taggat i guiden "De största evenemangen i Stockholm" / "The biggest Stockholm events".</div>';
+        key = 'block:' + (attendeesEl.id || 'label');
+      } else if (tagged && crmHit) {
+        noteHtml = '<div style="color:#1f7a4d;font-weight:600;">✅ Besöksantal finns redan i SBR (CRM): <b>' + Number(crmHit.participants).toLocaleString('sv-SE') + '</b> deltagare' +
+          (crmHit.title ? ' <span style="font-weight:400;">(matchar ”' + esc(crmHit.title) + '”)</span>' : '') + ' — spara är inte spärrat.</div>';
+        key = 'crm:' + crmKey(crmHit);
+        vlog('EventEdit: "Biggest events"-spärr gäller EJ — besöksantal finns redan i SBR/CRM (' + crmHit.participants + ' deltagare' + (crmHit.title ? ', matchar ”' + crmHit.title + '”' : '') + ').', 'ok');
+      }
+      if (key !== biggestGateNote) {
+        biggestGateNote = key;
+        setFieldNote(attendeesEl, 'biggestgate', noteHtml);
+      }
+    } catch (e) { vlog('Biggest-gate kastade: ' + (e && e.message ? e.message : e), 'err'); }
   }
 
   // Fyller bara i om fältet är tomt (rör aldrig text du redan skrivit).
@@ -11881,6 +11906,27 @@
   }
   const loadCmsExportCal = makeSharedListLoader(SBR_CAL_KEY, SBR_CAL_GH_PATH);
   const loadCmsExportCrm = makeSharedListLoader(SBR_CRM_KEY, SBR_CRM_GH_PATH);
+  // (v7.100.41) Delad CRM-matchning (samma titeltröskel som eventlistan; ett
+  // Visit-datum inom CRM-radens start–slut räcker via crmDatesOverlap) — används
+  // av både CMS-export-popupen och biggest-events-spärren.
+  function findBestCrmMatch(crm, titleEn, titleSv, visitDateArr) {
+    let best = null, bestSim = 0;
+    for (const e of crm) {
+      if (!e || !e.title) continue;
+      let s = Math.max(titleEn ? titleSim(titleEn, e.title) : 0, titleSv ? titleSim(titleSv, e.title) : 0);
+      if (s < 1) {
+        const nc = normText(e.title);
+        if ((normText(titleEn) && normText(titleEn) === nc) || (normText(titleSv) && normText(titleSv) === nc)) s = 1;
+      }
+      if (s < 0.75 || s <= bestSim) continue;
+      const cs = (parseSwedishDate(e.start_date || '') || (e.start_date || '')).slice(0, 10);
+      const ce = (parseSwedishDate(e.end_date || '') || (e.end_date || '')).slice(0, 10);
+      if (cs && visitDateArr.length && !visitDateArr.some(d => crmDatesOverlap(cs, ce, d, d))) continue;
+      best = e; bestSim = s;
+    }
+    return best;
+  }
+
   async function checkCmsExportStatus() {
     if (location.hostname === 'www.stockholmbusinessregion.se') return;
     const debug = (msg) => { if (msg !== lastCmsExportDebug) { lastCmsExportDebug = msg; vlog('CMS-export: ' + msg, 'err'); } };
@@ -11926,21 +11972,8 @@
     }
     // (v7.100.20) CRM-match: samma titeltröskel som eventlistan; ett
     // Visit-datum inom CRM-radens start–slut räcker (crmDatesOverlap).
-    let crmBest = null, crmBestSim = 0;
-    const visitDateArr = [...visitDates];
-    for (const e of crm) {
-      if (!e || !e.title) continue;
-      let s = Math.max(titleEn ? titleSim(titleEn, e.title) : 0, titleSv ? titleSim(titleSv, e.title) : 0);
-      if (s < 1) {
-        const nc = normText(e.title);
-        if ((normText(titleEn) && normText(titleEn) === nc) || (normText(titleSv) && normText(titleSv) === nc)) s = 1;
-      }
-      if (s < 0.75 || s <= crmBestSim) continue;
-      const cs = (parseSwedishDate(e.start_date || '') || (e.start_date || '')).slice(0, 10);
-      const ce = (parseSwedishDate(e.end_date || '') || (e.end_date || '')).slice(0, 10);
-      if (cs && visitDateArr.length && !visitDateArr.some(d => crmDatesOverlap(cs, ce, d, d))) continue;
-      crmBest = e; crmBestSim = s;
-    }
+    // (v7.100.41) Delad helper findBestCrmMatch — används även av biggest-gate.
+    const crmBest = findBestCrmMatch(crm, titleEn, titleSv, [...visitDates]);
     const key = best
       ? 'in:' + (best.title_en || best.title_sv || '') + '@' + (best.start_date || '')
       : (crmBest ? 'crm:' + crmKey(crmBest) : 'out:' + (titleEn || titleSv));
