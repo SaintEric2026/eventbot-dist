@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.46
+// @version      7.100.47
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -2518,8 +2518,12 @@
       } catch {}
       return { ok: selectedLen >= fullTextLen, selectedLen, fullTextLen };
     };
+    // (v7.100.47) "landat" = dolda fältet matchar ELLER synlig DOM matchar — på
+    // NEW-sidan (0 fiber-nycklar) synkar widgeten INTE dolda fältet från DOM, så
+    // en synlig träff räcker; dolda fältet synkas då av oss själva efteråt.
+    const landedNow = (payload) => draftailTextLanded(fieldId, payload) || normT(editable.textContent) === normT(payload);
     const waitLandedFor = async (payload) => {
-      for (let i = 0; i < 50; i++) { await wait(100); if (draftailTextLanded(fieldId, payload)) return true; }
+      for (let i = 0; i < 50; i++) { await wait(100); if (landedNow(payload)) return true; }
       return false;
     };
     // Försök 1: syntetisk paste — clipboardData ALLTID via defineProperty
@@ -2597,6 +2601,13 @@
     // insertText (legacy). Misslyckas båda → avbryt UTAN att röra dolda fältet,
     // återställ originalet över select-all.
     if (await attemptReplace(String(text))) {
+      // (v7.100.47) om synlig DOM landade men dolda fältet inte synkade själv
+      // (NEW utan widget-sync), skriv draft.js-JSON direkt — dolda fältet är det
+      // som sparas.
+      if (!draftailTextLanded(fieldId, String(text))) {
+        const okSync = await writeDraftailTextJSON(fieldId, String(text));
+        vlog('contentEditable ' + fieldId + ': synlig text landade men dolda fältet synkade inte själv — skrev JSON direkt (' + (okSync ? 'OK' : 'MISSLYCKADES') + ', dolt fält nu ' + hiddenLenNow() + ' tecken).', okSync ? 'ok' : 'err');
+      }
       // skärm-kontroll: vänta tills synlig text matchar; annars riktig re-render
       const wantS = normT(text);
       for (let i = 0; i < 20; i++) {
@@ -4631,7 +4642,14 @@
         await new Promise(r => setTimeout(r, 100));
         const modalGone = !document.querySelector('#tab-label-upload') || !document.querySelector('#tab-label-upload')?.offsetParent;
         const imgInForm = !!document.querySelector('img[src*="/media/"], .image-chooser img, [class*="image"] img');
-        if (modalGone && imgInForm) landed = true;
+        if (modalGone && imgInForm) { landed = true; break; }
+        // (v7.100.47) vissa Wagtail-versioner kräver bekräfta-knapp ("Välj") i
+        // modalen innan bilden landar i formuläret — prova den periodvis
+        if (i % 10 === 0) {
+          const modal = document.querySelector('.modal, [class*="chooser"], [class*="Chooser"]');
+          const confirm = modal && [...modal.querySelectorAll('button')].find(b => /^(välj|choose|select)$/i.test((b.textContent || '').trim()) && !b.disabled);
+          if (confirm) { confirm.click(); vlog('Klickade bekräfta-knappen i bildmodalen ("' + confirm.textContent.trim() + '").'); }
+        }
       }
       vlog(landed ? 'Venue-bild verifierad i formuläret (modal stängd).' : 'VARNING: venue-bild EJ verifierad i formuläret inom 6 s — kontrollera manuellt innan spar.', landed ? 'ok' : 'err');
     }
