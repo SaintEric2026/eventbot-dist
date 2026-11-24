@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.48
+// @version      7.100.49
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -128,13 +128,20 @@
   // Skriver till både konsolen (prefix VSEH) och en synlig loggruta i panelen,
   // så vi ser var det stannar även om konsolen verkar tyst.
   const VLOG = [];
+  // (v7.100.49) De första loggraderna (bl.a. "Script v… startar") pinnas i
+  // VLOG_HEAD — annars äts de upp av 200-radernas tak (VLOG.shift()) på sidor med
+  // många loggrader (t.ex. NEW med alla DEDUP-NÄRMISS-rader), och "Kopiera"-
+  // knappen får då inte med början av loggen (versionsraden försvann).
+  const VLOG_HEAD = [];
   function vlog(msg, kind) {
     const t = new Date();
     const hhmmss = String(t.getHours()).padStart(2,'0') + ':' +
                    String(t.getMinutes()).padStart(2,'0') + ':' +
                    String(t.getSeconds()).padStart(2,'0');
     const line = '[' + hhmmss + '] ' + msg;
-    VLOG.push({ line, kind: kind || 'info' });
+    const entry = { line, kind: kind || 'info' };
+    VLOG.push(entry);
+    if (VLOG_HEAD.length < 10) VLOG_HEAD.push(entry);   // (v7.100.49) head pinnas alltid
     if (VLOG.length > 200) VLOG.shift();
     try { console.log('VSEH ' + line); } catch {}
     try { renderLog(); } catch {}
@@ -144,6 +151,14 @@
       try { setEventStatus(activeEventIdx, msg, kind === 'err' ? 'err' : (kind === 'ok' ? 'ok' : 'work')); }
       catch {}
     }
+  }
+  // (v7.100.49) Komplett loggtext för kopiering: head-rader som ev. redan shiftats
+  // ur VLOG kommer först, sedan hela aktuella VLOG — "Kopiera" får alltid med
+  // början (inkl. "Script v… startar").
+  function vlogAllText() {
+    const cur = new Set(VLOG);
+    return VLOG_HEAD.filter(e => !cur.has(e)).map(e => e.line)
+      .concat(VLOG.map(e => e.line)).join('\n');
   }
   // Urklipp med fallback-kedja: moderna clipboard-API:t kan nekas i
   // userscript-sandlådor (även execCommand-vägen behövs då), och GM-bryggan
@@ -6120,7 +6135,7 @@
     { const lc = document.getElementById('vseh-logclose'); if (lc) lc.addEventListener('click', () => { $('vseh-logwrap').style.display = 'none'; }); }
     $('vseh-logcopy').addEventListener('click', async () => {
       const btn = $('vseh-logcopy');
-      const text = VLOG.map(e => e.line).join('\n');
+      const text = vlogAllText();
       const ok = await copyToClipboard(text); btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
     });
 
@@ -7263,7 +7278,7 @@
     $('vseh-logbtn').addEventListener('click', () => { const w = $('vseh-logwrap'); w.style.display = (w.style.display === 'none' || !w.style.display) ? 'flex' : 'none'; renderLog(); });
     { const lc = document.getElementById('vseh-logclose'); if (lc) lc.addEventListener('click', () => { $('vseh-logwrap').style.display = 'none'; }); }
     { const lcopy = document.getElementById('vseh-logcopy'); if (lcopy) lcopy.addEventListener('click', async () => {
-        const text = VLOG.map(e => e.line).join('\n');
+        const text = vlogAllText();
         const ok = await copyToClipboard(text); lcopy.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => lcopy.textContent = '📋 Kopiera', 1200);
       }); }
     { const lj = document.getElementById('vseh-logjson'); if (lj) lj.addEventListener('click', async () => {
@@ -7951,7 +7966,7 @@
         });
         document.getElementById('vseh-logcopy').addEventListener('click', async () => {
           const btn = document.getElementById('vseh-logcopy');
-          const text = VLOG.map(e => e.line).join('\n');
+          const text = vlogAllText();
           const ok = await copyToClipboard(text); btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
         });
     }
@@ -8301,7 +8316,7 @@
           document.getElementById('vseh-logclose').addEventListener('click', () => { w.style.display = 'none'; });
           document.getElementById('vseh-logcopy').addEventListener('click', async () => {
             const btn = document.getElementById('vseh-logcopy');
-            const ok = await copyToClipboard(VLOG.map(e => e.line).join('\n'));
+            const ok = await copyToClipboard(vlogAllText());
             btn.textContent = ok ? '✓ Kopierat' : 'Fel';
             setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
           });
@@ -8662,7 +8677,7 @@
         });
         document.getElementById('vseh-logcopy').addEventListener('click', async () => {
           const btn = document.getElementById('vseh-logcopy');
-          const text = VLOG.map(e => e.line).join('\n');
+          const text = vlogAllText();
           const ok = await copyToClipboard(text); btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
         });
       }
