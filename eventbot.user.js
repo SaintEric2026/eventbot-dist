@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.45
+// @version      7.100.46
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -2540,20 +2540,39 @@
     const tryInsertText = async (payload) => {
       let ok = false;
       try { ok = document.execCommand('insertText', false, payload); } catch { ok = false; }
-      if (!ok) return false;
+      if (!ok) { vlog('contentEditable ' + fieldId + ': execCommand(insertText) returnerade false.', 'warn'); return false; }
       return await waitLandedFor(payload);
     };
-    // Båda försöken över en NY select-all.
+    // (v7.100.46) Detaljerad per-stegs-logg — så vi ser exakt vilket försök som
+    // failar på vilken sida (NEW vs EDIT skiljer sig åt).
+    const hiddenLenNow = () => (readDraftailText(fieldId) || '').length;
     const attemptReplace = async (payload) => {
       const sel = selectAllVerified();
       if (!sel.ok) {
         vlog('Beskrivning: AVBRYTER skrivning till ' + fieldId + ' — select-all täckte inte hela fältet (' + sel.selectedLen + '/' + sel.fullTextLen + ' tecken). Klistra in manuellt.', 'err');
         return false;
       }
-      if (await tryPaste(payload)) return true;
+      const h0 = hiddenLenNow();
+      const ae = document.activeElement ? (document.activeElement.tagName + '.' + String(document.activeElement.className).slice(0, 30)) : 'null';
+      const pasteOk = await tryPaste(payload);
+      vlog('contentEditable ' + fieldId + ': paste landade=' + pasteOk + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ', activeElement=' + ae + ')', pasteOk ? 'ok' : 'warn');
+      if (pasteOk) return true;
       selectAllVerified();   // paste kan ha flyttat caret — bygg om markeringen
-      if (await tryInsertText(payload)) return true;
-      return false;
+      const insOk = await tryInsertText(payload);
+      vlog('contentEditable ' + fieldId + ': insertText landade=' + insOk + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ')', insOk ? 'ok' : 'warn');
+      if (insOk) return true;
+      // (v7.100.46) tredje försök: klicka IN i editorn först (vissa legacy-sidor
+      // kräver riktigt mus-fokus för execCommand), bygg om select-all, insertText
+      try {
+        editable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        editable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        editable.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        editable.focus();
+      } catch {}
+      selectAllVerified();
+      const insOk2 = await tryInsertText(payload);
+      vlog('contentEditable ' + fieldId + ': insertText efter klick landade=' + insOk2 + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ')', insOk2 ? 'ok' : 'warn');
+      return insOk2;
     };
     // Återställ original över select-all (aldrig tömma först); props-väg först.
     const restoreOriginal = async () => {
@@ -4603,7 +4622,19 @@
     const result = document.querySelector(
       '#tab-search a[class*="image"], #tab-search .chooser__image, #tab-search ul li a, [id^="tab-search"] a[href*="/images/"]'
     );
-    if (result) { result.click(); vlog('Venue-bild vald ("' + venueName.trim() + '").', 'ok'); }
+    if (result) {
+      result.click();
+      vlog('Venue-bild vald ("' + venueName.trim() + '").', 'ok');
+      // (v7.100.46) verifiera att bilden faktiskt landade i formuläret (modal stängd + img synlig)
+      let landed = false;
+      for (let i = 0; i < 60 && !landed; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        const modalGone = !document.querySelector('#tab-label-upload') || !document.querySelector('#tab-label-upload')?.offsetParent;
+        const imgInForm = !!document.querySelector('img[src*="/media/"], .image-chooser img, [class*="image"] img');
+        if (modalGone && imgInForm) landed = true;
+      }
+      vlog(landed ? 'Venue-bild verifierad i formuläret (modal stängd).' : 'VARNING: venue-bild EJ verifierad i formuläret inom 6 s — kontrollera manuellt innan spar.', landed ? 'ok' : 'err');
+    }
     else vlog('Hittade ingen bild på "' + venueName.trim() + '" — välj manuellt.', 'err');
   }
   // Fallback: växla till Sök-fliken, sök "fallback", välj enda träffen.
