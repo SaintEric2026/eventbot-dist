@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.47
+// @version      7.100.48
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -2521,7 +2521,22 @@
     // (v7.100.47) "landat" = dolda fältet matchar ELLER synlig DOM matchar — på
     // NEW-sidan (0 fiber-nycklar) synkar widgeten INTE dolda fältet från DOM, så
     // en synlig träff räcker; dolda fältet synkas då av oss själva efteråt.
-    const landedNow = (payload) => draftailTextLanded(fieldId, payload) || normT(editable.textContent) === normT(payload);
+    // (v7.100.48) på create-sidor synkar widgeten INTE dolda fältet — där räcker
+    // det att synlig DOM innehåller payload (insertText kan ha skrivit utan riktig
+    // select-all, ev. duplicerat); dolda fältet synkas av oss själva efteråt.
+    // På edit-sidor behålls strikt likhet (där måste widgeten synka dolda fältet).
+    const domFuzzyCreate = /\/cms\/api\/event\/create\//.test(location.pathname);
+    const landedNow = (payload) => {
+      if (draftailTextLanded(fieldId, payload)) return true;
+      const want = normT(payload);
+      const tc = normT(editable.textContent);
+      if (tc === want) return true;
+      if (domFuzzyCreate && want) {
+        const it = normT(editable.innerText || '');
+        if (tc.includes(want) || it === want || it.includes(want)) return true;
+      }
+      return false;
+    };
     const waitLandedFor = async (payload) => {
       for (let i = 0; i < 50; i++) { await wait(100); if (landedNow(payload)) return true; }
       return false;
@@ -2551,6 +2566,7 @@
     // failar på vilken sida (NEW vs EDIT skiljer sig åt).
     const hiddenLenNow = () => (readDraftailText(fieldId) || '').length;
     const attemptReplace = async (payload) => {
+      try { editable.focus(); } catch {}   // (v7.100.48) fokus INNAN select-all (focus efter selection kan kolla ihop den)
       const sel = selectAllVerified();
       if (!sel.ok) {
         vlog('Beskrivning: AVBRYTER skrivning till ' + fieldId + ' — select-all täckte inte hela fältet (' + sel.selectedLen + '/' + sel.fullTextLen + ' tecken). Klistra in manuellt.', 'err');
@@ -2561,6 +2577,7 @@
       const pasteOk = await tryPaste(payload);
       vlog('contentEditable ' + fieldId + ': paste landade=' + pasteOk + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ', activeElement=' + ae + ')', pasteOk ? 'ok' : 'warn');
       if (pasteOk) return true;
+      try { editable.focus(); } catch {}   // (v7.100.48) samma: fokus innan ny select-all
       selectAllVerified();   // paste kan ha flyttat caret — bygg om markeringen
       const insOk = await tryInsertText(payload);
       vlog('contentEditable ' + fieldId + ': insertText landade=' + insOk + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ')', insOk ? 'ok' : 'warn');
@@ -2576,6 +2593,12 @@
       selectAllVerified();
       const insOk2 = await tryInsertText(payload);
       vlog('contentEditable ' + fieldId + ': insertText efter klick landade=' + insOk2 + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ')', insOk2 ? 'ok' : 'warn');
+      if (!insOk2) {   // (v7.100.48) diagnostik så vi ser EXAKT vad DOM/dolt fält innehåller vid fail
+        const hEl = document.getElementById(fieldId);
+        let parses = false;
+        try { parses = !!(hEl && hEl.value && JSON.parse(hEl.value).blocks); } catch {}
+        vlog('contentEditable ' + fieldId + ': DIAGNOSTIK vid fail — textContent[0..80]="' + normT(editable.textContent).slice(0, 80) + '" | innerText[0..80]="' + normT(editable.innerText || '').slice(0, 80) + '" | dolt[0..80]="' + String((hEl && hEl.value) || '').slice(0, 80) + '" | dolt parsas som JSON: ' + parses, 'warn');
+      }
       return insOk2;
     };
     // Återställ original över select-all (aldrig tömma först); props-väg först.
@@ -2702,8 +2725,25 @@
           warnDraftailOnce(fieldId, `Beskrivning: ${fieldId} — contentEditable misslyckades tidigare utan props; pollern hoppar över (userAction försöker alltid).`);
           return false;
         }
+        // (v7.100.48) create-sidor (/cms/api/event/create/*): 0 fiber-nycklar →
+        // ingen React-state som kan skriva över dolda fältet, och widgeten synkar
+        // det ALDRIG själv där (logg: dolt 0→0 trots DOM-ändring). Där är dolda
+        // fältet DET SOM SPARAS → skriv JSON dit FÖRST (guardDraftailWrite verifierar
+        // att inget skriver över); contentEditable körs ändå som visuell feedback.
+        // EDIT-sidor (/edit/) berörs EJ — där gäller fortfarande v7.98.21: aldrig dold
+        // JSON när widgeten kan synka state→dolt fält (split-brain).
+        const isCreatePage = /\/cms\/api\/event\/create\//.test(location.pathname);
+        let hiddenOk = false;
+        if (isCreatePage) {
+          hiddenOk = await writeDraftailTextJSON(fieldId, String(text));
+          if (hiddenOk) installIntendedGuard(fieldId);   // (v7.100.45) intended-vakt + SPAR-reparation
+        }
         if (await updateDraftailViaClipboard(fieldId, text)) {
           vlog(`Beskrivning ifylld (contentEditable-reserv): ${fieldId} → ${String(text).slice(0, 60)}...`, 'ok');
+          return true;
+        }
+        if (hiddenOk) {
+          vlog(`Beskrivning ifylld (dolt fält direkt, create-sida utan fiber-nycklar — contentEditable var bara visuell feedback): ${fieldId} → ${String(text).slice(0, 60)}...`, 'ok');
           return true;
         }
         if (!userAction) draftailNoAutoRetry.add(fieldId);   // (v7.100.45)
@@ -4636,22 +4676,41 @@
     if (result) {
       result.click();
       vlog('Venue-bild vald ("' + venueName.trim() + '").', 'ok');
-      // (v7.100.46) verifiera att bilden faktiskt landade i formuläret (modal stängd + img synlig)
+      // (v7.100.46/v7.100.48) verifiera att bilden faktiskt landade i formuläret
+      // (modal stängd + img synlig). (v7.100.48) vissa Wagtail-choosers kräver
+      // dubbelklick på resultatet ELLER en bekräfta-knapp/Enter i modalen — logga
+      // alla modalknappar en gång, klicka sedan bästa bekräfta-matchningen periodvis
+      // (aldrig Avbryt/Stäng), annars Enter; efter 2 s ett nytt försök på resultatet.
       let landed = false;
-      for (let i = 0; i < 60 && !landed; i++) {
+      let btnsLogged = false;
+      const modalEl = () => document.querySelector('.modal, [class*="chooser"], [class*="Chooser"]');
+      const findConfirm = () => {
+        const m = modalEl();
+        if (!m) return null;
+        const btns = [...m.querySelectorAll('button')].filter(b => !b.disabled);
+        return btns.find(b => {
+          const t = (b.textContent || '').trim().toLowerCase();
+          if (/avbryt|cancel|close|stäng/i.test(t)) return false;
+          return /^(välj|choose|select|använd|use|lägg till|add|confirm|klar|ok)\b/.test(t) || /bekräfta|confirm/i.test(t);
+        }) || btns.find(b => /button-primary|w-btn/.test(b.className) && b.closest('.modal-footer, footer, [class*="footer"]'));
+      };
+      for (let i = 0; i < 80 && !landed; i++) {
         await new Promise(r => setTimeout(r, 100));
         const modalGone = !document.querySelector('#tab-label-upload') || !document.querySelector('#tab-label-upload')?.offsetParent;
         const imgInForm = !!document.querySelector('img[src*="/media/"], .image-chooser img, [class*="image"] img');
         if (modalGone && imgInForm) { landed = true; break; }
-        // (v7.100.47) vissa Wagtail-versioner kräver bekräfta-knapp ("Välj") i
-        // modalen innan bilden landar i formuläret — prova den periodvis
-        if (i % 10 === 0) {
-          const modal = document.querySelector('.modal, [class*="chooser"], [class*="Chooser"]');
-          const confirm = modal && [...modal.querySelectorAll('button')].find(b => /^(välj|choose|select)$/i.test((b.textContent || '').trim()) && !b.disabled);
-          if (confirm) { confirm.click(); vlog('Klickade bekräfta-knappen i bildmodalen ("' + confirm.textContent.trim() + '").'); }
+        if (!btnsLogged && i >= 10) {
+          const m = modalEl();
+          if (m) { vlog('Bildmodalens knappar: ' + [...m.querySelectorAll('button')].map(b => '"' + (b.textContent || '').trim().slice(0, 30) + '"' + (b.disabled ? ' (disabled)' : '')).join(', '), 'warn'); btnsLogged = true; }
         }
+        if (i % 10 === 0) {
+          const cb = findConfirm();
+          if (cb) { cb.click(); vlog('Klickade bekräfta-knappen i bildmodalen ("' + cb.textContent.trim().slice(0, 30) + '").'); }
+          else { const m = modalEl(); if (m) { try { m.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); } catch {} } }
+        }
+        if (i === 20) { try { result.click(); result.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); vlog('Bildmodal: nytt försök — klick + dubbelklick på resultatet.', 'warn'); } catch {} }
       }
-      vlog(landed ? 'Venue-bild verifierad i formuläret (modal stängd).' : 'VARNING: venue-bild EJ verifierad i formuläret inom 6 s — kontrollera manuellt innan spar.', landed ? 'ok' : 'err');
+      vlog(landed ? 'Venue-bild verifierad i formuläret (modal stängd).' : 'VARNING: venue-bild EJ verifierad i formuläret inom 8 s — kontrollera manuellt innan spar.', landed ? 'ok' : 'err');
     }
     else vlog('Hittade ingen bild på "' + venueName.trim() + '" — välj manuellt.', 'err');
   }
