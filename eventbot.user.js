@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.49
+// @version      7.100.50
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -4576,14 +4576,26 @@
     // bildbanken i stället på EVENTETS VENUE-NAMN (t.ex. "Kistamässan") —
     // en bild på platsen är rätt bild även när arrangören inte levererat en.
     if (!imageUrl) {
-      // (2026-10-16) Venue-namnet: agentens schema skiljer sig mellan flöden
-      // (TM: venue_name_sv/en, URL/SBR: venue_name) — sista utvägen läser
-      // det redan ifyllda formulärfältet.
+      // (v7.100.50) Sökordning i bildbanken utan pressbild: FÖRST två första orden
+      // i eventtiteln (t.ex. "Phoebe Bridgers" — ofta artistens pressbild), DÄREFTER
+      // platsnamnet som fallback ("Avicii Arena"). Första sökning som ger en
+      // verifierad träff vinner.
       const venueForImg = (data.venue_name_sv || data.venue_name_en || data.venue_name ||
         (document.getElementById('id_venue_name_sv')?.value || '') ||
         (document.getElementById('id_venue_name_en')?.value || '')).trim();
-      vlog('Ingen pressbild — söker bildbanken på eventets venue-namn i stället.');
-      await useVenueImageSearch(venueForImg);
+      const titleForImg = (data.title_sv || data.title_en || '').trim();
+      const twoWords = titleForImg.split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
+      const queries = [];
+      if (twoWords) queries.push(twoWords);
+      if (venueForImg && venueForImg !== twoWords) queries.push(venueForImg);
+      if (!queries.length) { vlog('Ingen pressbild och inget sökord (titel/venue) — välj bild manuellt.', 'err'); return; }
+      for (const q of queries) {
+        vlog('Ingen pressbild — söker bildbanken på "' + q + '"' + (q !== queries[0] ? ' (fallback: platsnamn)' : ' (titelens två första ord)') + '…');
+        const ok = await useVenueImageSearch(q);
+        unlockPageScroll();   // (v7.100.50) Wagtail lämnar ibland body låst efter modalen
+        if (ok) return;
+      }
+      vlog('Ingen bild landade i formuläret för något sökord — välj bild manuellt.', 'err');
       return;
     }
 
@@ -4651,6 +4663,7 @@
     } else {
       vlog('Hittade ej aktiv "Ladda upp"-knapp — klicka den manuellt för att slutföra.', 'err');
     }
+    unlockPageScroll();   // (v7.100.50) ta bort ev. kvarlämnat sidolås efter bildmodalen
   }
 
   // (2026-10-19) Robusthet: stänger kvarlämnade chooser-modaler/backdrops
@@ -4668,29 +4681,57 @@
     document.body.style.removeProperty('padding-right');
     vlog('Bildautomation: städade ev. kvarlämnad modal/backdrop (Esc + stäng-knappar).', 'ok');
   }
-  // (2026-10-16) Söker bildbanken på venue-namnet och väljer första träffen.
-  // Den gamlla "fallback"-sökningen är borttagen — ingen fallback-bild finns.
+  // (v7.100.50) Chooser-modalen kan lämna kvar body.modal-open + overflow:hidden
+  // (och ev. en kvarbliven backdrop) även när modalen syns stängd — då låser
+  // sig hela sidan (ingen scroll). Körs efter varje chooser/uppladdningsflöde.
+  function unlockPageScroll() {
+    document.querySelectorAll('.modal-backdrop, .ChooserModal-backdrop, .overlay-active')
+      .forEach(el => { try { el.remove(); } catch {} });
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('overflow');
+    document.body.style.removeProperty('padding-right');
+    if (document.documentElement.style.overflow) document.documentElement.style.removeProperty('overflow');
+  }
+  // (2026-10-16/v7.100.50) Söker bildbanken på sökordet och väljer BÄSTA träffen
+  // (poäng = antal sökord i resultatets text/alt/aria-label/titel), inte bara första.
+  // Returnerar true om bilden verifierat landade i formuläret. Anroparen provar
+  // sökorden i ordning (titelens två första ord, sedan platsnamn som fallback).
   async function useVenueImageSearch(venueName) {
     if (!venueName || !venueName.trim()) {
-      vlog('Ingen pressbild och inget venue-namn att söka på — välj bild manuellt.', 'err');
-      return;
+      vlog('Inget sökord att söka på — välj bild manuellt.', 'err');
+      return false;
     }
     const searchTab = document.getElementById(IMG_SEARCH_TAB);
-    if (!searchTab) { vlog('Sök-fliken hittades ej.', 'err'); return; }
+    if (!searchTab) { vlog('Sök-fliken hittades ej.', 'err'); return false; }
     searchTab.click();
     await new Promise(r => setTimeout(r, 400));
     let searchInput = document.getElementById(IMG_SEARCH_INPUT) ||
       document.querySelector('#tab-search input[type="text"], [id^="tab-search"] input[type="text"]');
-    if (!searchInput) { vlog('Bildsök-fältet hittades ej — välj bild manuellt.', 'err'); return; }
+    if (!searchInput) { vlog('Bildsök-fältet hittades ej — välj bild manuellt.', 'err'); return false; }
     setNativeValue(searchInput, venueName.trim());
     vlog('Söker "' + venueName.trim() + '" i bildbanken…');
-    await new Promise(r => setTimeout(r, 1200));
-    const result = document.querySelector(
-      '#tab-search a[class*="image"], #tab-search .chooser__image, #tab-search ul li a, [id^="tab-search"] a[href*="/images/"]'
-    );
+    // (v7.100.50) polla efter AJAX-resultat tills minst en träff finns (max 5 s)
+    let results = [];
+    for (let i = 0; i < 50 && !results.length; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      results = [...document.querySelectorAll(
+        '#tab-search a[class*="image"], #tab-search .chooser__image, #tab-search ul li a, [id^="tab-search"] a[href*="/images/"]'
+      )];
+    }
+    if (!results.length) { vlog('Hittade ingen bild på "' + venueName.trim() + '" — provar nästa sökord/manuellt.', 'err'); return false; }
+    // (v7.100.50) välj bästa träffen: antal sökord som finns i text/alt/aria-label/titel
+    const tokens = venueName.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const scoreOf = (el) => {
+      const img = el.querySelector('img');
+      const t = ((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.title || '') + ' ' + ((img && img.alt) || '') + ' ' + ((img && img.title) || '')).toLowerCase();
+      return tokens.reduce((acc, tk) => acc + (t.includes(tk) ? 1 : 0), 0);
+    };
+    let result = results[0], bestScore = scoreOf(results[0]);
+    results.forEach(el => { const sc = scoreOf(el); if (sc > bestScore) { result = el; bestScore = sc; } });
+    if (results.length > 1) vlog('Bildträffar för "' + venueName.trim() + '": ' + results.length + ' st — väljer bästa (poäng ' + bestScore + '/' + tokens.length + '): "' + (result.textContent || '').trim().slice(0, 40) + '".', 'ok');
+    result.click();
+    vlog('Bild vald för "' + venueName.trim() + '" (poäng ' + bestScore + '): "' + (result.textContent || '').trim().slice(0, 40) + '".', 'ok');
     if (result) {
-      result.click();
-      vlog('Venue-bild vald ("' + venueName.trim() + '").', 'ok');
       // (v7.100.46/v7.100.48) verifiera att bilden faktiskt landade i formuläret
       // (modal stängd + img synlig). (v7.100.48) vissa Wagtail-choosers kräver
       // dubbelklick på resultatet ELLER en bekräfta-knapp/Enter i modalen — logga
@@ -4725,9 +4766,10 @@
         }
         if (i === 20) { try { result.click(); result.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); vlog('Bildmodal: nytt försök — klick + dubbelklick på resultatet.', 'warn'); } catch {} }
       }
-      vlog(landed ? 'Venue-bild verifierad i formuläret (modal stängd).' : 'VARNING: venue-bild EJ verifierad i formuläret inom 8 s — kontrollera manuellt innan spar.', landed ? 'ok' : 'err');
+      unlockPageScroll();   // (v7.100.50) sidolåset efter modalen tas bort
+      vlog(landed ? 'Bild verifierad i formuläret (modal stängd).' : 'VARNING: bild EJ verifierad i formuläret inom 8 s — kontrollera manuellt innan spar.', landed ? 'ok' : 'err');
+      return landed;
     }
-    else vlog('Hittade ingen bild på "' + venueName.trim() + '" — välj manuellt.', 'err');
   }
   // Fallback: växla till Sök-fliken, sök "fallback", välj enda träffen.
   async function useFallbackImage() {
