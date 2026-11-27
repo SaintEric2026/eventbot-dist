@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.50
+// @version      7.100.51
 // @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
@@ -2591,12 +2591,12 @@
       const ae = document.activeElement ? (document.activeElement.tagName + '.' + String(document.activeElement.className).slice(0, 30)) : 'null';
       const pasteOk = await tryPaste(payload);
       vlog('contentEditable ' + fieldId + ': paste landade=' + pasteOk + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ', activeElement=' + ae + ')', pasteOk ? 'ok' : 'warn');
-      if (pasteOk) return true;
+      if (pasteOk && (!domFuzzyCreate || normT(editable.textContent) === normT(payload))) return true;   // (v7.100.51) create: dolda fältet kan redan matcha (vi skrev det först) — då måste insertText ändå köras för skärmen
       try { editable.focus(); } catch {}   // (v7.100.48) samma: fokus innan ny select-all
       selectAllVerified();   // paste kan ha flyttat caret — bygg om markeringen
       const insOk = await tryInsertText(payload);
       vlog('contentEditable ' + fieldId + ': insertText landade=' + insOk + ' (dolt ' + h0 + '→' + hiddenLenNow() + ' tecken, synlig=' + normT(editable.textContent).length + ')', insOk ? 'ok' : 'warn');
-      if (insOk) return true;
+      if (insOk && (!domFuzzyCreate || normT(editable.textContent) === normT(payload))) return true;   // (v7.100.51) samma villkor på create
       // (v7.100.46) tredje försök: klicka IN i editorn först (vissa legacy-sidor
       // kräver riktigt mus-fokus för execCommand), bygg om select-all, insertText
       try {
@@ -2670,6 +2670,14 @@
       return true;
     }
     await restoreOriginal();
+    if (domFuzzyCreate) {   // (v7.100.51) create-sidor: ingen React-state finns att desynka — måla texten direkt i DOM som sista visuella fallback (dolda fältet är auktoritärt för sparningen)
+      try {
+        if (normT(editable.textContent) !== normT(String(text))) {
+          editable.textContent = String(text);
+          vlog('contentEditable ' + fieldId + ': visuell nödfallback — textContent satt direkt på create-sida (ingen React här; dolda fältet styr sparningen).', 'warn');
+        }
+      } catch {}
+    }
     const restored = originalText ? draftailTextLanded(fieldId, originalText) : false;
     warnDraftailOnce(fieldId, 'Beskrivning: kunde INTE skriva till ' + fieldId + ' automatiskt (paste + insertText verifierades inte över select-all) — ' + (restored ? 'originaltexten är återställd.' : 'klistra in manuellt!'));
     vlog('Beskrivning: AUTOMATISK IFYLLNING MISSLYCKADES för ' + fieldId + ' — dolda fältet ORÖRT (icke-destruktiv väg, ingen tömning).', 'err');
