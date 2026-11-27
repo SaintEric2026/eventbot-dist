@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.51
-// @description  v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
+// @version      7.100.52
+// @description  v7.100.52: UI — Wagtail-palett mörkt/ljust, EN delad loggruta som alltid ligger i viewportn (placeLogBox), panel 460px som börjar under topplisten, +1–2 steg typsnitt, versionspill, namnformat "Widgetnamn – Funktionsnamn" + emojis. v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
 // @match        https://www.stockholmbusinessregion.se/wt/cms/snippets/api/event/*
@@ -179,6 +179,7 @@
     } catch { return false; }
   }
   function renderLog() {
+    ensureLogBox();   // (v7.100.52) en enda delad loggruta i document.body
     const box = document.getElementById('vseh-log');
     if (!box) return;
     box.innerHTML = VLOG.slice(-60).map(e =>
@@ -187,6 +188,71 @@
       '</div>').join('');
     box.scrollTop = box.scrollHeight;
   }
+  // (v7.100.52) EN delad loggruta i document.body. Tidigare låg #vseh-logwrap
+  // INUTI panelens HTML med position:fixed — i min-läge (transform på
+  // #vseh-panel.min) positionerades den mot 46px-remsan, inte viewportn, och
+  // flera vyer hade dubbla id="vseh-logwrap". Nu skapas en enda .vseh-logwrap
+  // här; alla loggknappar togglar samma instans via toggleLogBox().
+  function ensureLogBox() {
+    let box = document.querySelector('.vseh-logwrap');
+    if (box) return box;
+    if (!document.body) return null;
+    box = document.createElement('div');
+    box.className = 'vseh-logwrap';
+    box.style.display = 'none';
+    box.innerHTML = `<div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;">
+        <button type="button" class="vseh-logjson" title="Kopiera hämtad JSON">JSON</button>
+        <button type="button" class="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button>
+        <button type="button" class="vseh-logclose" title="Stäng">✕</button></span></div>
+      <div id="vseh-log"></div>`;
+    document.body.appendChild(box);
+    box.querySelector('.vseh-logclose').addEventListener('click', () => { box.style.display = 'none'; });
+    box.querySelector('.vseh-logcopy').addEventListener('click', async () => {
+      const btn = box.querySelector('.vseh-logcopy');
+      const ok = await copyToClipboard(vlogAllText());
+      btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
+    });
+    const jb = box.querySelector('.vseh-logjson');
+    jb.addEventListener('click', async () => {
+      const data = (typeof lastGrouped !== 'undefined') ? lastGrouped : null;
+      const ok = await copyToClipboard(JSON.stringify(data, null, 2));
+      jb.textContent = ok ? '✓' : 'Fel'; setTimeout(() => jb.textContent = 'JSON', 1200);
+    });
+    return box;
+  }
+  // (v7.100.52) Positionerar loggrutan så den ALLTID ligger helt innanför
+  // viewportn (minst 10px marginal). Om panelen är maximerad och rutan skulle
+  // överlappa den → lägg rutan till vänster om panelen.
+  function placeLogBox() {
+    const box = ensureLogBox();
+    if (!box || box.style.display === 'none') return;
+    const bw = box.offsetWidth, bh = box.offsetHeight;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left = vw - bw - 10;                 // default: nere till höger
+    let top = vh - bh - 10;
+    const panel = document.getElementById('vseh-panel');
+    if (panel && panel.classList.contains('max')) {
+      const pr = panel.getBoundingClientRect();
+      if (left < pr.left + pr.width && left + bw > pr.left && top < pr.bottom && top + bh > pr.top) {
+        left = pr.left - bw - 10;            // överlappar panelen → vänster om den
+      }
+    }
+    left = Math.min(Math.max(10, left), Math.max(10, vw - bw - 10));
+    top = Math.min(Math.max(10, top), Math.max(10, vh - bh - 10));
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+  }
+  function toggleLogBox() {
+    const box = ensureLogBox();
+    if (!box) return;
+    const show = box.style.display === 'none' || !box.style.display;
+    box.style.display = show ? 'flex' : 'none';
+    if (show) { renderLog(); placeLogBox(); }
+  }
+  window.addEventListener('resize', () => {   // (v7.100.52) håll loggrutan i viewportn vid resize
+    const b = document.querySelector('.vseh-logwrap');
+    if (b && b.style.display !== 'none') placeLogBox();
+  });
   // Global felfångare — visar oväntade fel i loggrutan.
   window.addEventListener('error', e => {
     try { vlog('JS-FEL: ' + (e.message || e.error) + ' @ ' + (e.filename||'').split('/').pop() + ':' + e.lineno, 'err'); } catch {}
@@ -5525,11 +5591,11 @@
   // :root-blocket nedan oavsett ordning, tack vare högre specificitet.
   const VSEH_THEME_VARS_CSS = `
     :root {
-      --vd-bg:#1e222b; --vd-bg2:#262b36; --vd-bg3:#2f3542; --vd-line:#3a3f4b;
+      --vd-bg:#1e222b; --vd-bg2:#262b36; --vd-bg3:#222222; --vd-line:#333333;
       --vd-txt:#e8eaee; --vd-txt2:#a8adb8; --vd-txt3:#787e8a; --vd-accent:#4a9fe0;
     }
     html[data-vseh-theme="light"] {
-      --vd-bg:#f4f5f7; --vd-bg2:#ffffff; --vd-bg3:#eceef2; --vd-line:#d7dbe1;
+      --vd-bg:#f4f5f7; --vd-bg2:#ffffff; --vd-bg3:#f6f6f8; --vd-line:#e0e0e0;
       --vd-txt:#1b1f27; --vd-txt2:#4a5162; --vd-txt3:#767c8a; --vd-accent:#2f6fd1;
     }
   `;
@@ -5545,17 +5611,18 @@
     #vseh-panel.min { top:50%; right:0; bottom:auto; width:46px; max-height:80vh;
       transform:translateY(-50%); border-radius:10px 0 0 10px; }
     #vseh-panel.min #vseh-head { flex-direction:column; padding:12px 6px; }
-    #vseh-panel.min #vseh-head .t { display:none; }
+    #vseh-panel.min #vseh-head .t { font-size:0; gap:0; }   /* (v7.100.52) rubriktexten döljs i min-läge, versions-pillen syns fortfarande */
+    #vseh-panel.min #vseh-head .t .vseh-verpill { font-size:9px; padding:1px 4px; margin-left:0; }
     #vseh-panel.min #vseh-headbtns { flex-direction:column; }
     #vseh-panel.min #vseh-headbtns .vseh-btn-gap { width:auto; height:10px; }
     /* Minimera-knappens ikon roterad 90° i minimerat läge — visar att
        panelen nu kollapsar åt sidan istället för nedåt. */
     #vseh-panel.min #vseh-headbtns button[data-m="min"] { transform:rotate(90deg); }
-    #vseh-panel.max { top:18px; bottom:18px; right:18px; width:440px; }
+    #vseh-panel.max { bottom:18px; right:18px; width:460px; }   /* (v7.100.52) 440→460px; top sätts via JS i setMode() så panelen börjar under Wagtails topplist */
     #vseh-panel * { box-sizing:border-box; }
     #vseh-head { padding:11px 14px; background:var(--vd-bg3); color:var(--vd-txt); display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; border-bottom:1px solid var(--vd-line); }
-    #vseh-head .t { font-size:17px; font-weight:700; letter-spacing:-.01em; }
-    #vseh-head .v { font-size:9px; font-weight:400; color:#1a3a6b; margin-left:6px; letter-spacing:0; }
+    #vseh-head .t { font-size:18px; font-weight:700; letter-spacing:-.01em; }   /* (v7.100.52) 17→18px */
+    .vseh-verpill { display:inline-block; padding:1px 7px; border-radius:5px; font-size:11px; font-weight:800; background:var(--vd-accent); color:#0d1520; margin-left:6px; vertical-align:middle; }   /* (v7.100.52) versionspill ersätter gamla .v */
     #vseh-headbtns { display:flex; gap:3px; align-items:center; }
     #vseh-headbtns .vseh-btn-gap { width:14px; display:inline-block; }
     #vseh-headbtns button { background:rgba(255,255,255,.08); border:none; color:var(--vd-txt); cursor:pointer; width:26px; height:24px; border-radius:6px; font-size:12px; line-height:1; display:flex; align-items:center; justify-content:center; }
@@ -5564,44 +5631,44 @@
     /* Flikar */
     #vseh-tabs { display:flex; gap:2px; padding:0 8px; background:var(--vd-bg3); border-bottom:1px solid var(--vd-line); flex-shrink:0; }
     #vseh-panel.min #vseh-tabs { display:none; }
-    .vseh-tab { background:transparent; border:none; color:var(--vd-txt2); font-family:inherit; font-size:11.5px; font-weight:600; padding:9px 11px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; white-space:nowrap; }
+    .vseh-tab { background:transparent; border:none; color:var(--vd-txt2); font-family:inherit; font-size:13px; font-weight:600; padding:9px 11px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; white-space:nowrap; }
     .vseh-tab:hover { color:var(--vd-txt); }
     .vseh-tab.active { color:var(--vd-accent); border-bottom-color:var(--vd-accent); }
     #vseh-dup-count { font-weight:700; }
     .vseh-tabpane { display:none; }
     .vseh-tabpane.active { display:block; }
     /* Hämtningsknappar */
-    .vseh-fetch-h { font-size:11px; font-weight:600; color:var(--vd-txt2); text-transform:uppercase; letter-spacing:.04em; margin-bottom:7px; }
+    .vseh-fetch-h { font-size:12px; font-weight:600; color:var(--vd-txt2); text-transform:uppercase; letter-spacing:.04em; margin-bottom:7px; }
     .vseh-fetch-divider { border-bottom:1px solid var(--vd-line); margin:2px 0 10px; }
-    .vseh-url-warn { font-size:11px; font-weight:600; color:#ffcf6b; background:#332a17; border:1px solid #6a5620; border-radius:7px; padding:8px 10px; margin-top:9px; line-height:1.5; }
+    .vseh-url-warn { font-size:12px; font-weight:600; color:#ffcf6b; background:#332a17; border:1px solid #6a5620; border-radius:7px; padding:8px 10px; margin-top:9px; line-height:1.5; }
     #vseh-url-create { width:100%; background:transparent; color:var(--vd-accent); border:1px solid var(--vd-accent); border-radius:7px; padding:10px; font-size:13px; font-weight:650; cursor:pointer; }
     #vseh-url-create:hover:not(:disabled) { background:var(--vd-accent); color:#0d1520; }
     #vseh-url-create:disabled { border-color:var(--vd-line); color:var(--vd-txt3); cursor:not-allowed; opacity:.7; }
-    #vseh-url-copyjson { width:100%; background:var(--vd-bg2); border:1px solid var(--vd-line); color:var(--vd-txt); border-radius:7px; padding:8px; font-size:12px; font-weight:600; cursor:pointer; }
+    #vseh-url-copyjson { width:100%; background:var(--vd-bg2); border:1px solid var(--vd-line); color:var(--vd-txt); border-radius:7px; padding:8px; font-size:13px; font-weight:600; cursor:pointer; }
     #vseh-url-copyjson:hover { background:var(--vd-bg3); }
     .vseh-fetch-line { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
-    .vseh-fetch-line button { flex:0 0 130px; background:var(--vd-accent); color:#0d1520; border:none; border-radius:7px; padding:9px; font-size:12.5px; font-weight:650; cursor:pointer; }
+    .vseh-fetch-line button { flex:0 0 130px; background:var(--vd-accent); color:#0d1520; border:none; border-radius:7px; padding:9px; font-size:13px; font-weight:650; cursor:pointer; }
     .vseh-fetch-line button:hover:not(:disabled) { filter:brightness(1.1); }
     .vseh-fetch-line button:disabled { background:var(--vd-line); color:var(--vd-txt3); cursor:not-allowed; }
-    .vseh-fetch-ts { font-size:10.5px; color:var(--vd-txt3); font-family:monospace; }
+    .vseh-fetch-ts { font-size:12px; color:var(--vd-txt3); font-family:monospace; }
     .vseh-prog { position:relative; height:16px; background:var(--vd-bg3); border-radius:8px; overflow:hidden; margin:0 0 9px; }
     .vseh-prog-bar { position:absolute; left:0; top:0; bottom:0; width:0%; background:var(--vd-accent); transition:width .2s ease; }
     .vseh-prog-txt { position:absolute; left:0; right:0; top:0; bottom:0; display:flex; align-items:center; justify-content:center; font-size:9.5px; font-weight:600; color:var(--vd-txt); }
-    .vseh-hint { font-size:10.5px; color:var(--vd-txt3); margin-bottom:9px; }
+    .vseh-hint { font-size:12px; color:var(--vd-txt3); margin-bottom:9px; }
     #vseh-scroll { overflow-y:auto; padding:14px 15px; flex:1; }
     #vseh-panel.min #vseh-scroll { display:none; }
 
     .vseh-row { margin-bottom:10px; }
-    .vseh-row label { display:block; font-size:11px; font-weight:600; color:var(--vd-txt2); margin-bottom:4px; }
-    .vseh-row input, .vseh-row select { width:100%; font-size:13px; padding:8px 10px; border:1px solid var(--vd-line); border-radius:7px; font-family:inherit; background:var(--vd-bg); color:var(--vd-txt); }
+    .vseh-row label { display:block; font-size:12px; font-weight:600; color:var(--vd-txt2); margin-bottom:4px; }
+    .vseh-row input, .vseh-row select { width:100%; font-size:14px; padding:8px 10px; border:1px solid var(--vd-line); border-radius:7px; font-family:inherit; background:var(--vd-bg); color:var(--vd-txt); }
     .vseh-row input:focus, .vseh-row select:focus { outline:2px solid var(--vd-accent); outline-offset:-1px; }
     .vseh-key { font-family:monospace; font-size:12px !important; }
-    .vseh-name-warn { display:none; font-size:10.5px; color:#ff6b6b; margin-top:4px; }
+    .vseh-name-warn { display:none; font-size:12px; color:#ff6b6b; margin-top:4px; }
     .vseh-name-warn.on { display:block; }
     .vseh-two { display:flex; gap:9px; } .vseh-two > div { flex:1; }
     .vseh-divider { border:none; border-top:1px solid var(--vd-line); margin:16px 0; }
     .vseh-dropzone { flex:1; border:1.5px dashed var(--vd-line); border-radius:7px; padding:8px 10px;
-      font-size:11px; color:var(--vd-txt3); text-align:center; cursor:pointer; transition:border-color .12s, background .12s; }
+      font-size:12px; color:var(--vd-txt3); text-align:center; cursor:pointer; transition:border-color .12s, background .12s; }
     .vseh-dropzone.vseh-drop-hover { border-color:var(--vd-accent); background:var(--vd-bg3); color:var(--vd-txt); }
     #vseh-guide-list { display:flex; flex-direction:column; gap:6px; }
     .vseh-guide-item { display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border:1px solid var(--vd-line); border-radius:7px; background:var(--vd-bg2); }
@@ -5613,18 +5680,18 @@
     .vseh-guide-item button:hover { color:var(--vd-accent); }
     #vseh-guide-test-result .vseh-guide-hit { font-size:12px; padding:6px 10px; margin-bottom:4px; border-radius:7px; background:var(--vd-bg2); border:1px solid var(--vd-accent); color:var(--vd-txt); }
     #vseh-guide-test-result .vseh-guide-nohit { font-size:11.5px; color:var(--vd-txt3); padding:4px 2px; }
-    #vseh-settings-export, #sbr-settings-export { font-size:11.5px; font-weight:600; padding:7px 11px;
+    #vseh-settings-export, #sbr-settings-export { font-size:13px; font-weight:600; padding:7px 11px;
       border:1px solid var(--vd-line); background:var(--vd-bg2); color:var(--vd-accent); border-radius:7px;
       cursor:pointer; white-space:nowrap; }
     #vseh-settings-export:hover, #sbr-settings-export:hover { background:var(--vd-bg3); }
 
     #vseh-dedup-row { display:flex; align-items:center; gap:8px; margin:10px 0 2px; flex-wrap:wrap; }
-    #vseh-dedup-btn { font-size:11.5px; font-weight:600; padding:7px 11px; border:1px solid var(--vd-line); background:var(--vd-bg2); color:var(--vd-accent); border-radius:7px; cursor:pointer; white-space:nowrap; }
+    #vseh-dedup-btn { font-size:13px; font-weight:600; padding:7px 11px; border:1px solid var(--vd-line); background:var(--vd-bg2); color:var(--vd-accent); border-radius:7px; cursor:pointer; white-space:nowrap; }
     #vseh-dedup-btn:hover:not(:disabled) { background:var(--vd-bg3); } #vseh-dedup-btn:disabled { color:var(--vd-txt3); cursor:not-allowed; }
-    #vseh-clean-btn { font-size:11.5px; font-weight:600; padding:7px 11px; border:1px solid var(--vd-line); background:var(--vd-bg2); color:#e0b060; border-radius:7px; cursor:pointer; white-space:nowrap; }
+    #vseh-clean-btn { font-size:13px; font-weight:600; padding:7px 11px; border:1px solid var(--vd-line); background:var(--vd-bg2); color:#e0b060; border-radius:7px; cursor:pointer; white-space:nowrap; }
     #vseh-clean-btn:hover:not(:disabled) { background:var(--vd-bg3); } #vseh-clean-btn:disabled { color:var(--vd-txt3); cursor:not-allowed; }
-    #vseh-dedup-state { font-size:11px; color:var(--vd-txt3); font-family:monospace; }
-    #vseh-status { font-family:monospace; font-size:11.5px; color:var(--vd-txt2); margin:11px 0 4px; min-height:16px; }
+    #vseh-dedup-state { font-size:12px; color:var(--vd-txt3); font-family:monospace; }
+    #vseh-status { font-family:monospace; font-size:12px; color:var(--vd-txt2); margin:11px 0 4px; min-height:16px; }
     #vseh-status.err { color:#ff8080; } #vseh-status.ok { color:#7ddca0; } #vseh-status.work { color:#e0b060; }
     #vseh-stats { display:flex; gap:8px; margin:10px 0 10px; flex-wrap:wrap; }
     #vseh-stats .s { flex:1; min-width:64px; background:var(--vd-bg2); border:1.5px solid transparent; border-radius:8px; padding:9px 4px; text-align:center; cursor:pointer; transition:border-color .12s, background .12s; }
@@ -5635,7 +5702,7 @@
     #vseh-srcfilter button { font-size:10.5px; font-weight:700; padding:3px 10px; border-radius:20px; border:1.5px solid transparent; background:var(--vd-bg2); color:var(--vd-txt2); cursor:pointer; }
     #vseh-srcfilter button.active { border-color:var(--vd-txt); color:var(--vd-txt); }
     #vseh-actions { display:flex; gap:8px; margin:6px 0 12px; }
-    #vseh-actions button { flex:1; font-size:12px; font-weight:500; padding:8px; border:1px solid var(--vd-line); background:var(--vd-bg2); color:var(--vd-accent); border-radius:7px; cursor:pointer; }
+    #vseh-actions button { flex:1; font-size:13px; font-weight:500; padding:8px; border:1px solid var(--vd-line); background:var(--vd-bg2); color:var(--vd-accent); border-radius:7px; cursor:pointer; }
     #vseh-actions button:hover:not(:disabled) { background:var(--vd-bg3); } #vseh-actions button:disabled { color:var(--vd-txt3); cursor:not-allowed; }
     #vseh-monthfilter, #sbr-crm-monthfilter { margin-top:8px; }
     #vseh-monthfilter select, #sbr-crm-monthfilter select {
@@ -5653,11 +5720,11 @@
     .vseh-ev h4 { margin:0 0 3px; font-size:13.5px; font-weight:640; display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
     .vseh-badge { font-size:10px; font-weight:700; padding:2px 8px; border-radius:5px; white-space:nowrap; flex-shrink:0; }
     .vseh-badge.expandable { cursor:pointer; } .vseh-badge.expandable::after { content:' ⌄'; }
-    .vseh-ev .m { font-size:11.5px; color:var(--vd-txt2); } .vseh-ev .v { font-weight:600; color:var(--vd-txt); }
-    .vseh-ev .dates { font-size:11px; color:var(--vd-txt2); margin-top:5px; } .vseh-ev .dates b { color:var(--vd-txt); font-weight:600; }
-    .vseh-ev .detail { font-size:10.5px; color:#e0b060; margin-top:3px; font-style:italic; }
+    .vseh-ev .m { font-size:12px; color:var(--vd-txt2); } .vseh-ev .v { font-weight:600; color:var(--vd-txt); }
+    .vseh-ev .dates { font-size:12px; color:var(--vd-txt2); margin-top:5px; } .vseh-ev .dates b { color:var(--vd-txt); font-weight:600; }
+    .vseh-ev .detail { font-size:12px; color:#e0b060; margin-top:3px; font-style:italic; }
     .vseh-cancel { font-size:10.5px; font-weight:700; color:#ff8080; margin-top:5px; background:#3a1f1f; border:1px solid #6a2a2a; border-radius:5px; padding:4px 7px; }
-    .vseh-ev-status { font-size:11px; font-weight:600; margin-top:7px; padding:6px 9px; border-radius:6px; font-family:monospace; }
+    .vseh-ev-status { font-size:12px; font-weight:600; margin-top:7px; padding:6px 9px; border-radius:6px; font-family:monospace; }
     .vseh-ev-status.work { color:#e0b060; background:#2a2620; border:1px solid #4a4230; }
     .vseh-ev-status.ok { color:#7ddca0; background:#1f2f26; border:1px solid #2f5a42; }
     .vseh-ev-status.err { color:#ff8080; background:#3a1f1f; border:1px solid #6a2a2a; }
@@ -5667,11 +5734,11 @@
     .vseh-cat { font-size:11px; font-weight:700; padding:2px 9px; border-radius:12px; color:#0d1520; }
     .vseh-src { font-size:11px; font-weight:700; padding:2px 9px; border-radius:12px; color:#0d1520; }
     .vseh-create { margin-top:8px; }
-    .vseh-create button { display:inline-block; width:auto; font-size:11.5px; font-weight:650; padding:6px 12px; border:1px solid var(--vd-accent); background:transparent; color:var(--vd-accent); border-radius:7px; cursor:pointer; }
+    .vseh-create button { display:inline-block; width:auto; font-size:13px; font-weight:650; padding:6px 12px; border:1px solid var(--vd-accent); background:transparent; color:var(--vd-accent); border-radius:7px; cursor:pointer; }
     .vseh-create button:hover:not(:disabled) { background:var(--vd-accent); color:#0d1520; }
     .vseh-create button.busy { opacity:.7; cursor:progress; }
     .vseh-create button.done { border-color:#2f9a63; color:#7ddca0; cursor:default; opacity:1; }
-    .vseh-manin { display:inline-block; width:auto; margin-left:6px; font-size:11px; font-weight:600; padding:6px 11px; border:1px solid var(--vd-line); background:transparent; color:var(--vd-txt2); border-radius:7px; cursor:pointer; }
+    .vseh-manin { display:inline-block; width:auto; margin-left:6px; font-size:12px; font-weight:600; padding:6px 11px; border:1px solid var(--vd-line); background:transparent; color:var(--vd-txt2); border-radius:7px; cursor:pointer; }
     .vseh-manin:hover { border-color:#7ddca0; color:#7ddca0; }
     .vseh-manin.on { border-color:#2f9a63; color:#7ddca0; }
     .vseh-empty { text-align:center; color:var(--vd-txt3); font-size:12.5px; padding:26px 10px; }
@@ -5679,7 +5746,7 @@
     .vseh-cmp-grid { display:flex; gap:10px; } .vseh-cmp-col { flex:1; min-width:0; }
     .vseh-cmp-col h5 { margin:0 0 5px; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--vd-txt3); }
     /* Enhetlig item-struktur för BÅDA kolumnerna (design 1) */
-    .vseh-item { background:var(--vd-bg); border:1px solid var(--vd-line); border-radius:7px; padding:8px 9px; margin-bottom:6px; font-size:11.5px; line-height:1.5; }
+    .vseh-item { background:var(--vd-bg); border:1px solid var(--vd-line); border-radius:7px; padding:8px 9px; margin-bottom:6px; font-size:12px; line-height:1.5; }
     .vseh-item-title { font-weight:640; color:var(--vd-txt); margin-bottom:3px; }
     .vseh-item-row { color:var(--vd-txt2); }
     .vseh-item-row .lab { color:var(--vd-txt3); display:inline-block; min-width:42px; }
@@ -5688,14 +5755,14 @@
     .vseh-edit:hover { background:var(--vd-bg3); }
     .vseh-dismiss { font-size:10.5px; font-weight:600; color:#7ddca0; white-space:nowrap; border:1px solid #2f9a63; padding:2px 9px; border-radius:5px; background:transparent; cursor:pointer; }
     .vseh-dismiss:hover { background:#1f3a2a; }
-    .vseh-nomatch { font-size:11px; color:var(--vd-txt3); font-style:italic; }
+    .vseh-nomatch { font-size:12px; color:var(--vd-txt3); font-style:italic; }
     /* Datumpresentation (design 2) */
     .dp-span { color:#e0a052; font-weight:600; }
     .dp-one { color:var(--vd-txt); font-weight:600; }
     .dp-multi { color:var(--vd-accent); font-weight:600; cursor:pointer; user-select:none; }
     .dp-arrow { font-size:9px; }
     .dp-dates { margin-top:4px; color:var(--vd-txt2); font-size:11px; line-height:1.6; }
-    #vseh-logwrap { position:fixed; bottom:18px; left:18px; width:440px; max-height:50vh; z-index:2147483000;
+    .vseh-logwrap { position:fixed; width:min(440px, calc(100vw - 20px)); max-height:50vh; z-index:2147483000;   /* (v7.100.52) EN delad ruta i body — left/top sätts av placeLogBox() så rutan alltid ligger i viewportn; ingen fast position i CSS */
     /* (2026-10-26, v7.100.9) 2147483000 = nära max för z-index — Wagtails
        dialogfönster/modaler ligger runt z-index 1050+, så loggfönstret måste
        upp dit för att synas även när en dialog är öppen. */
@@ -5704,8 +5771,8 @@
     .vseh-loghdr { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--vd-txt2); padding:8px 11px;
       background:var(--vd-bg3); border-bottom:1px solid var(--vd-line); display:flex; justify-content:space-between; align-items:center; }
     .vseh-loghdr button { background:rgba(255,255,255,.08); border:none; color:var(--vd-txt); height:20px; border-radius:5px; cursor:pointer; font-size:11px; padding:0 6px; }
-    #vseh-logcopy { width:auto; font-weight:600; }
-    #vseh-logclose { width:20px; }
+    .vseh-logcopy { width:auto; font-weight:600; }
+    .vseh-logclose { width:20px; }
     #vseh-log { background:#0d1117; padding:9px 11px; overflow-y:auto; font-family:monospace; font-size:10.5px; line-height:1.55; flex:1; }
     .vseh-logline { color:#a8adb8; white-space:pre-wrap; word-break:break-word; }
     .vseh-logline.ok { color:#7ddca0; } .vseh-logline.err { color:#ff8080; }
@@ -5919,13 +5986,13 @@
       font-size:12px; font-weight:600; background:var(--vd-bg3); color:var(--vd-txt); }
     #vseh-setbox .vseh-hint { font-size:11px; color:var(--vd-txt3); margin:4px 0 10px; }
     #vseh-setbox .vseh-sb-io { display:flex; gap:10px; align-items:center; margin-bottom:12px; }
-    #vseh-setbox .vseh-name-warn { display:none; font-size:10.5px; color:#ff6b6b; margin-top:4px; }
+    #vseh-setbox .vseh-name-warn { display:none; font-size:12px; color:#ff6b6b; margin-top:4px; }
     #vseh-setbox .vseh-name-warn.on { display:block; }
     #vseh-setbox .vseh-sb-export { font-size:11.5px; font-weight:600; padding:7px 11px; white-space:nowrap;
       border:1px solid var(--vd-line); background:var(--vd-bg2); color:var(--vd-accent); border-radius:7px; cursor:pointer; }
     #vseh-setbox .vseh-sb-export:hover { background:var(--vd-bg3); }
     #vseh-setbox .vseh-dropzone { flex:1; border:1.5px dashed var(--vd-line); border-radius:7px; padding:8px 10px;
-      font-size:11px; color:var(--vd-txt3); text-align:center; cursor:pointer; transition:border-color .12s, background .12s; }
+      font-size:12px; color:var(--vd-txt3); text-align:center; cursor:pointer; transition:border-color .12s, background .12s; }
     #vseh-setbox .vseh-dropzone.vseh-drop-hover { border-color:var(--vd-accent); background:var(--vd-bg3); color:var(--vd-txt); }
     #vseh-setbox .vseh-divider { border:none; border-top:1px solid var(--vd-line); margin:12px 0; }
     #vseh-setbox .vseh-row { display:flex; flex-direction:column; gap:3px; margin-bottom:10px; }
@@ -6049,20 +6116,20 @@
     p.className = mode;
     p.innerHTML = `
       <div id="vseh-head">
-        <div class="t">Eventbot SBR.se<span class="v">v${SCRIPT_VERSION}</span></div>
+        <div class="t">Eventbot – Översikt SBR<span class="vseh-verpill">v${SCRIPT_VERSION}</span></div>
         <div id="vseh-headbtns">
-          <button type="button" data-m="min" title="Minimera">▁</button>
-          <button type="button" data-m="max" title="Maximera">▢</button>
+          <button type="button" data-m="min" title="Minimera">🗕</button>
+          <button type="button" data-m="max" title="Maximera">🗖</button>
           <span class="vseh-btn-gap"></span>
           <button type="button" id="vseh-logbtn" title="Visa logg">📋</button>
         </div>
       </div>
       <div id="vseh-tabs">
-        <button type="button" class="vseh-tab active" data-tab="url">🔗 URL</button>
+        <button type="button" class="vseh-tab active" data-tab="url">🔗 URL-utdraft</button>
         <button type="button" class="vseh-tab" data-tab="sbr-crm">📥 CRM-import</button>
-        <button type="button" class="vseh-tab" data-tab="sbr-src">📇 Källor</button>
+        <button type="button" class="vseh-tab" data-tab="sbr-src">🗂 Källor</button>
         <button type="button" class="vseh-tab" data-tab="sbr-cal">📅 Eventlista <span id="sbr-cal-count"></span></button>
-        <button type="button" class="vseh-tab" data-tab="sbr-set">⚙️</button>
+        <button type="button" class="vseh-tab" data-tab="sbr-set">⚙️ Inställningar</button>
       </div>
       <div id="vseh-scroll"><div id="vseh-inner">
 
@@ -6170,9 +6237,6 @@
         </div>
 
       </div></div>
-      <div id="vseh-logwrap" style="display:none;"><div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;">
-        <button type="button" id="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button>
-        <button type="button" id="vseh-logclose" title="Stäng">✕</button></span></div><div id="vseh-log"></div></div>
     `;
     document.body.appendChild(p);
 
@@ -6181,13 +6245,8 @@
     document.querySelectorAll('#vseh-headbtns button[data-m]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.m)));
     document.querySelectorAll('.vseh-tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
     restoreLastTab();
-    $('vseh-logbtn').addEventListener('click', () => { const w = $('vseh-logwrap'); w.style.display = (w.style.display === 'none' || !w.style.display) ? 'flex' : 'none'; renderLog(); });
-    { const lc = document.getElementById('vseh-logclose'); if (lc) lc.addEventListener('click', () => { $('vseh-logwrap').style.display = 'none'; }); }
-    $('vseh-logcopy').addEventListener('click', async () => {
-      const btn = $('vseh-logcopy');
-      const text = vlogAllText();
-      const ok = await copyToClipboard(text); btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
-    });
+        setMode(mode);   // (v7.100.52) applicera sparat läge direkt (sätter top i max-läge)
+    $('vseh-logbtn').addEventListener('click', toggleLogBox);   // (v7.100.52) delad loggruta i body
 
     $('vseh-url-create').addEventListener('click', () => createEventFromUrl($('vseh-url-input').value.trim()));
     { const ucj = document.getElementById('vseh-url-copyjson'); if (ucj) ucj.addEventListener('click', async () => {
@@ -6301,20 +6360,20 @@
     const p = document.createElement('div'); p.id = 'vseh-panel'; p.className = mode;
     p.innerHTML = `
       <div id="vseh-head">
-        <div class="t">Eventbot<span class="v">v${SCRIPT_VERSION}</span></div>
+        <div class="t">Eventbot – Översikt<span class="vseh-verpill">v${SCRIPT_VERSION}</span></div>
         <div id="vseh-headbtns">
-          <button type="button" data-m="min" title="Minimera">▁</button>
-          <button type="button" data-m="max" title="Maximera">▢</button>
+          <button type="button" data-m="min" title="Minimera">🗕</button>
+          <button type="button" data-m="max" title="Maximera">🗖</button>
           <span class="vseh-btn-gap"></span>
           <button type="button" id="vseh-logbtn" title="Visa logg">📋</button>
         </div>
       </div>
       <div id="vseh-tabs">
-        <button type="button" class="vseh-tab active" data-tab="cal">📆 Kalendrar</button>
+        <button type="button" class="vseh-tab active" data-tab="cal">📅 Kalendrar</button>
         <button type="button" class="vseh-tab" data-tab="url">🔗 URL</button>
-        <button type="button" class="vseh-tab" data-tab="dup">🎭 Dubbletter <span id="vseh-dup-count"></span></button>
+        <button type="button" class="vseh-tab" data-tab="dup">🧭 Dubbletter <span id="vseh-dup-count"></span></button>
         <button type="button" class="vseh-tab" data-tab="guides">📚 Guider</button>
-        <button type="button" class="vseh-tab" data-tab="set">⚙️</button>
+        <button type="button" class="vseh-tab" data-tab="set">⚙️ Inställningar</button>
       </div>
       <div id="vseh-scroll"><div id="vseh-inner">
 
@@ -6483,7 +6542,6 @@
         </div>
 
       </div></div>
-      <div id="vseh-logwrap" style="display:none;"><div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;"><button type="button" id="vseh-logjson" title="Kopiera hämtad JSON">JSON</button><button type="button" id="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button><button type="button" id="vseh-logclose" title="Stäng">✕</button></span></div><div id="vseh-log"></div></div>
     `;
     document.body.appendChild(p);
     // Kategori/sidor delas nu med den delade inställningslådan (GM) —
@@ -6509,6 +6567,15 @@
   }
   function setMode(m) {
     mode = m; $('vseh-panel').className = m;
+    // (v7.100.52) max-läge: top sätts via JS så panelen börjar UNDER Wagtails
+    // topplist (CSS har ingen fast top längre) — täcker aldrig header:n
+    if (m === 'max') {
+      const hdr = document.querySelector('header');
+      const hb = (hdr && hdr.getBoundingClientRect().bottom) || 56;
+      $('vseh-panel').style.top = (hb + 8) + 'px';
+    } else {
+      $('vseh-panel').style.removeProperty('top');
+    }
     document.querySelectorAll('#vseh-headbtns button[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m === m));
     GM_setValue('window_mode', m);
   }
@@ -7005,6 +7072,7 @@
         const bar = document.createElement('div');
         bar.id = 'vseh-guide-bar';
         bar.innerHTML = `
+          <strong>Eventbot – Guider</strong> <span class="vseh-verpill">v${SCRIPT_VERSION}</span>
           <button type="button" id="vseh-guide-toggle">📋 Guide-lista</button>
           <span id="vseh-guide-count"></span>
           <button type="button" id="vseh-guide-setbtn" title="Inställningar">⚙️</button>
@@ -7325,15 +7393,8 @@
     document.querySelectorAll('#vseh-headbtns button[data-m]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.m)));
     document.querySelectorAll('.vseh-tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
     restoreLastTab();
-    $('vseh-logbtn').addEventListener('click', () => { const w = $('vseh-logwrap'); w.style.display = (w.style.display === 'none' || !w.style.display) ? 'flex' : 'none'; renderLog(); });
-    { const lc = document.getElementById('vseh-logclose'); if (lc) lc.addEventListener('click', () => { $('vseh-logwrap').style.display = 'none'; }); }
-    { const lcopy = document.getElementById('vseh-logcopy'); if (lcopy) lcopy.addEventListener('click', async () => {
-        const text = vlogAllText();
-        const ok = await copyToClipboard(text); lcopy.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => lcopy.textContent = '📋 Kopiera', 1200);
-      }); }
-    { const lj = document.getElementById('vseh-logjson'); if (lj) lj.addEventListener('click', async () => {
-        const ok = await copyToClipboard(JSON.stringify(lastGrouped, null, 2)); lj.textContent = ok ? '✓' : 'Fel'; setTimeout(() => lj.textContent = 'JSON', 1200);
-      }); }
+        setMode(mode);   // (v7.100.52) applicera sparat läge direkt (sätter top i max-läge)
+    $('vseh-logbtn').addEventListener('click', toggleLogBox);   // (v7.100.52) delad loggruta i body
     { const cr = document.getElementById('vseh-clean-run'); if (cr) cr.addEventListener('click', doCleanupScan); }
     { const dr = document.getElementById('vseh-diag-run'); if (dr) dr.addEventListener('click', runDupDiagnostic); }
     { const de = document.getElementById('vseh-diag-export'); if (de) de.addEventListener('click', async () => {
@@ -7983,8 +8044,8 @@
         const bar = document.createElement('div');
         bar.id = 'vseh-draft-bar';
         bar.innerHTML = `
-          <strong>Eventbot – Dubblettkoll</strong>
-          <button type="button" id="vseh-draft-fetch-btn">Hämta Visit-Kalendern</button>
+          <strong>Eventbot – Dubblettkoll</strong> <span class="vseh-verpill">v${SCRIPT_VERSION}</span>
+          <button type="button" id="vseh-draft-fetch-btn">⬇️ Hämta Visit-Kalendern</button>
           <span id="vseh-draft-ts"></span>
           <span id="vseh-draft-progress"></span>
           <button type="button" id="vseh-draft-logbtn" title="Visa logg">📋 Logg</button>
@@ -7993,32 +8054,9 @@
         insertBarAtTop(bar);
         document.getElementById('vseh-draft-fetch-btn').addEventListener('click', loadDedupForDraft);
         document.getElementById('vseh-draft-setbtn').addEventListener('click', toggleSettingsBox);
-        // Samma fristående logwrap-mönster som EDIT-sidans #vseh-edit-logbtn
-        // (draftvyn har liksom EDIT ingen egen flytande panel att lägga
-        // loggrutan i) — bekräftat saknades helt här (2026-09-29).
-        const logWrap = document.createElement('div');
-        logWrap.id = 'vseh-logwrap';
-        logWrap.style.display = 'none';
-        logWrap.innerHTML = `
-          <div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;">
-            <button type="button" id="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button>
-            <button type="button" id="vseh-logclose" title="Stäng">✕</button></span></div>
-          <div id="vseh-log"></div>
-        `;
-        document.body.appendChild(logWrap);
-        document.getElementById('vseh-draft-logbtn').addEventListener('click', () => {
-          const w = document.getElementById('vseh-logwrap');
-          w.style.display = (w.style.display === 'none' || !w.style.display) ? 'flex' : 'none';
-          renderLog();
-        });
-        document.getElementById('vseh-logclose').addEventListener('click', () => {
-          document.getElementById('vseh-logwrap').style.display = 'none';
-        });
-        document.getElementById('vseh-logcopy').addEventListener('click', async () => {
-          const btn = document.getElementById('vseh-logcopy');
-          const text = vlogAllText();
-          const ok = await copyToClipboard(text); btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
-        });
+        // (v7.100.52) loggrutan är numera EN delad ruta i document.body
+        // (ensureLogBox/toggleLogBox) — ingen egen #vseh-logwrap här längre
+        document.getElementById('vseh-draft-logbtn').addEventListener('click', toggleLogBox);
     }
     updateDraftvyTs();
     // Ingen automatisk hämtning här (den är tung — läser hela Visit-kalendern
@@ -8343,37 +8381,16 @@
       const bar = document.createElement('div');
       bar.id = 'vseh-sbrdraft-bar';
       bar.innerHTML = `
-        <strong>Eventbot – Dubblettkoll (SBR-eventlista)</strong>
-        <button type="button" id="vseh-sbrdraft-run">Sök dubbletter i importerad lista</button>
-        <button type="button" id="vseh-sbrdraft-import">Hämta synliga rader till Eventlista</button>
+        <strong>Eventbot – SBR-draft</strong> <span class="vseh-verpill">v${SCRIPT_VERSION}</span>
+        <button type="button" id="vseh-sbrdraft-run">▶️ Sök dubbletter…</button>
+        <button type="button" id="vseh-sbrdraft-import">⬇️ Hämta synliga rader…</button>
         <span id="vseh-sbrdraft-ts"></span>
         <button type="button" id="vseh-sbrdraft-logbtn" title="Visa logg">📋 Logg</button>
       `;
       insertBarAtTop(bar);
       document.getElementById('vseh-sbrdraft-run').addEventListener('click', () => runSbrDraftCheck());
       document.getElementById('vseh-sbrdraft-import').addEventListener('click', () => { fetchVisibleSbrEvents(); runSbrDraftCheck(); });
-      document.getElementById('vseh-sbrdraft-logbtn').addEventListener('click', () => {
-        let w = document.getElementById('vseh-logwrap');
-        if (!w) {
-          w = document.createElement('div');
-          w.id = 'vseh-logwrap';
-          w.style.display = 'none';
-          w.innerHTML = `<div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;">
-            <button type="button" id="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button>
-            <button type="button" id="vseh-logclose" title="Stäng">✕</button></span></div>
-            <div id="vseh-log"></div>`;
-          document.body.appendChild(w);
-          document.getElementById('vseh-logclose').addEventListener('click', () => { w.style.display = 'none'; });
-          document.getElementById('vseh-logcopy').addEventListener('click', async () => {
-            const btn = document.getElementById('vseh-logcopy');
-            const ok = await copyToClipboard(vlogAllText());
-            btn.textContent = ok ? '✓ Kopierat' : 'Fel';
-            setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
-          });
-        }
-        w.style.display = (w.style.display === 'none' || !w.style.display) ? 'flex' : 'none';
-        renderLog();
-      });
+      document.getElementById('vseh-sbrdraft-logbtn').addEventListener('click', toggleLogBox);   // (v7.100.52) delad loggruta i body
     }
     updateSbrDraftTs();
     // Hydrera från sparad lista direkt — ingen tung hämtning behövs.
@@ -8707,29 +8724,8 @@
         `;
         anchor.parentNode.insertBefore(bar, anchor.nextSibling);
         document.getElementById('vseh-edit-setbtn').addEventListener('click', toggleSettingsBox);
-        const logWrap = document.createElement('div');
-        logWrap.id = 'vseh-logwrap';
-        logWrap.style.display = 'none';
-        logWrap.innerHTML = `
-          <div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;">
-            <button type="button" id="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button>
-            <button type="button" id="vseh-logclose" title="Stäng">✕</button></span></div>
-          <div id="vseh-log"></div>
-        `;
-        document.body.appendChild(logWrap);
-        document.getElementById('vseh-edit-logbtn').addEventListener('click', () => {
-          const w = document.getElementById('vseh-logwrap');
-          w.style.display = (w.style.display === 'none' || !w.style.display) ? 'flex' : 'none';
-          renderLog();
-        });
-        document.getElementById('vseh-logclose').addEventListener('click', () => {
-          document.getElementById('vseh-logwrap').style.display = 'none';
-        });
-        document.getElementById('vseh-logcopy').addEventListener('click', async () => {
-          const btn = document.getElementById('vseh-logcopy');
-          const text = vlogAllText();
-          const ok = await copyToClipboard(text); btn.textContent = ok ? '✓ Kopierat' : 'Fel'; setTimeout(() => btn.textContent = '📋 Kopiera', 1200);
-        });
+        // (v7.100.52) loggrutan är numera EN delad ruta i document.body (ensureLogBox/toggleLogBox)
+        document.getElementById('vseh-edit-logbtn').addEventListener('click', toggleLogBox);
       }
     }
   }
