@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         EventBot
 // @namespace    visitstockholm.eventtools
-// @version      7.100.52
-// @description  v7.100.52: UI — Wagtail-palett mörkt/ljust, EN delad loggruta som alltid ligger i viewportn (placeLogBox), panel 460px som börjar under topplisten, +1–2 steg typsnitt, versionspill, namnformat "Widgetnamn – Funktionsnamn" + emojis. v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
+// @version      7.100.53
+// @description  v7.100.53: neutralt grått accent (--vd-accent #9aa0ab/#5a6472, UI-blått #4a9fe0 → var(--vd-accent)), tabb ⚙️ Inställningar → ⚙️, Dubbletter → 🎭, versionspill i loggrutans header + EDIT-baren. v7.100.52: UI — Wagtail-palett mörkt/ljust, EN delad loggruta som alltid ligger i viewportn (placeLogBox), panel 460px som börjar under topplisten, +1–2 steg typsnitt, versionspill, namnformat "Widgetnamn – Funktionsnamn" + emojis. v7.54.0: Ny källa — Nortic. Ingen dokumenterad publik API hittades, men avläsning av nortic.se/stad/stockholms egna Nuxt-SSR-svar avslöjade den exakta anrops-URL:en (services.nortic.se/public/v1/events?city=Stockholm...) som sidan själv använder; bekräftat med 320 Stockholmsevent över 16 sidor. Ingen nyckel behövs — nytt "Nortic"-hämtningsläge i fliken Kalendrar, samma mönster som Ticketmaster/Billetto/Tickster. v7.53.10: Billetto-hämtningen byter datakälla till samma Algolia-sökindex som billetto.se:s egen sajt använder, istället för det publisher/annonsbegränsade v3/public/events-API:et (bekräftat: gav t.ex. hela 540+ Stockholmsevent inom 25 km mot tidigare ~140, och inkluderar nu "Grand Antiques Art & Design" som tidigare API:et aldrig kunde returnera). Kräver ingen egen API-nyckel längre — Billetto-fälten i Inställningar är borttagna. Fix Billetto-dubbletter från v7.53.8/9 (venue_name-kollisioner) kvarstår som skyddsnät. Käll-filterchipsen i "Ej inlagda" visar antal event per källa och inverterade färger på vald källa. Rättstavning "Dubblettkoll"/"Dubblett" (2 b). Draftvy-dubblettkoll med badges och jämförelsevy. Rewrite-agent (EventChecker) på edit-sidor. All funktion från v0.7.51 bevarad.
 // @match        https://www.visitstockholm.com/cms/api/event/create/*
 // @match        https://www.visitstockholm.se/cms/api/event/create/*
 // @match        https://www.stockholmbusinessregion.se/wt/cms/snippets/api/event/*
@@ -200,7 +200,7 @@
     box = document.createElement('div');
     box.className = 'vseh-logwrap';
     box.style.display = 'none';
-    box.innerHTML = `<div class="vseh-loghdr">Diagnostiklogg <span style="display:flex;gap:5px;">
+    box.innerHTML = `<div class="vseh-loghdr">Diagnostiklogg <span class="vseh-verpill">v${SCRIPT_VERSION}</span> <span style="display:flex;gap:5px;">   <!-- (v7.100.53) versionspill i loggrutan -->
         <button type="button" class="vseh-logjson" title="Kopiera hämtad JSON">JSON</button>
         <button type="button" class="vseh-logcopy" title="Kopiera loggen">📋 Kopiera</button>
         <button type="button" class="vseh-logclose" title="Stäng">✕</button></span></div>
@@ -5592,11 +5592,11 @@
   const VSEH_THEME_VARS_CSS = `
     :root {
       --vd-bg:#1e222b; --vd-bg2:#262b36; --vd-bg3:#222222; --vd-line:#333333;
-      --vd-txt:#e8eaee; --vd-txt2:#a8adb8; --vd-txt3:#787e8a; --vd-accent:#4a9fe0;
+      --vd-txt:#e8eaee; --vd-txt2:#a8adb8; --vd-txt3:#787e8a; --vd-accent:#9aa0ab;   /* (v7.100.53) neutralt grått */
     }
     html[data-vseh-theme="light"] {
       --vd-bg:#f4f5f7; --vd-bg2:#ffffff; --vd-bg3:#f6f6f8; --vd-line:#e0e0e0;
-      --vd-txt:#1b1f27; --vd-txt2:#4a5162; --vd-txt3:#767c8a; --vd-accent:#2f6fd1;
+      --vd-txt:#1b1f27; --vd-txt2:#4a5162; --vd-txt3:#767c8a; --vd-accent:#5a6472;   /* (v7.100.53) neutralt grått (ljust) */
     }
   `;
   const PANEL_CSS = VSEH_THEME_VARS_CSS + `
@@ -6129,7 +6129,7 @@
         <button type="button" class="vseh-tab" data-tab="sbr-crm">📥 CRM-import</button>
         <button type="button" class="vseh-tab" data-tab="sbr-src">🗂 Källor</button>
         <button type="button" class="vseh-tab" data-tab="sbr-cal">📅 Eventlista <span id="sbr-cal-count"></span></button>
-        <button type="button" class="vseh-tab" data-tab="sbr-set">⚙️ Inställningar</button>
+        <button type="button" class="vseh-tab" data-tab="sbr-set">⚙️</button>   <!-- (v7.100.53) -->
       </div>
       <div id="vseh-scroll"><div id="vseh-inner">
 
@@ -6371,9 +6371,9 @@
       <div id="vseh-tabs">
         <button type="button" class="vseh-tab active" data-tab="cal">📅 Kalendrar</button>
         <button type="button" class="vseh-tab" data-tab="url">🔗 URL</button>
-        <button type="button" class="vseh-tab" data-tab="dup">🧭 Dubbletter <span id="vseh-dup-count"></span></button>
+        <button type="button" class="vseh-tab" data-tab="dup">🎭 Dubbletter <span id="vseh-dup-count"></span></button>   <!-- (v7.100.53) -->
         <button type="button" class="vseh-tab" data-tab="guides">📚 Guider</button>
-        <button type="button" class="vseh-tab" data-tab="set">⚙️ Inställningar</button>
+        <button type="button" class="vseh-tab" data-tab="set">⚙️</button>   <!-- (v7.100.53) -->
       </div>
       <div id="vseh-scroll"><div id="vseh-inner">
 
@@ -8604,7 +8604,7 @@
     btn.textContent = '🤔 Mejla nekat event';
     btn.style.cssText = 'display:block; margin:6px 0 10px; padding:6px 12px; font-size:12.5px; ' +
       'font-weight:600; border:1px solid var(--vd-line, #3a3f4b); border-radius:6px; cursor:pointer; ' +
-      'background:var(--vd-accent, #4a9fe0); color:#fff;';
+      'background:var(--vd-accent, #9aa0ab); color:#fff;'   /* (v7.100.53) fallback grått */;
     // Två knappar (på begäran 2026-10-06): nekat / godkänt event, var sin mall.
     const wrap = document.createElement('div');
     wrap.id = 'vseh-mail-arrangor-wrap';
@@ -8717,7 +8717,7 @@
         const bar = document.createElement('div');
         bar.id = 'vseh-edit-bar';
         bar.innerHTML = `
-          <span id="vseh-edit-title">Eventbot: EDIT</span>
+          <span id="vseh-edit-title">Eventbot: EDIT</span> <span class="vseh-verpill">v${SCRIPT_VERSION}</span>   <!-- (v7.100.53) -->
           <span id="vseh-issues-summary" style="color:#e0a052;font-weight:600;"></span>
           <button type="button" id="vseh-edit-logbtn" title="Visa logg">📋 Logg</button>
           <button type="button" id="vseh-edit-setbtn" title="Inställningar">⚙️</button>
@@ -11170,7 +11170,7 @@
       if (!identical) { setFieldNote(el, 'translate', ''); return; }
       const label = lang === 'en' ? 'engelska' : 'svenska';
       setFieldNote(el, 'translate',
-        '<span style="color:#4a9fe0;">🌐 Samma text i båda fälten — </span>' +
+        '<span style="color:var(--vd-accent);">🌐 Samma text i båda fälten — </span>   /* (v7.100.53) */' +
         '<button type="button" class="vseh-translate-btn" data-lang="' + lang + '" style="font-size:12px;padding:2px 8px;cursor:pointer;">Översätt till ' + label + '</button>');
     });
     document.querySelectorAll('.vseh-translate-btn').forEach(btn => {
@@ -11219,7 +11219,7 @@
       }
       const label = lang === 'en' ? 'engelska' : 'svenska';
       const html =
-        '<span style="color:#4a9fe0;">🌍 Samma rubrik och text i båda fälten — </span>' +
+        '<span style="color:var(--vd-accent);">🌍 Samma rubrik och text i båda fälten — </span>   /* (v7.100.53) */' +
         '<button type="button" class="vseh-translate-td-btn" data-lang="' + lang + '" style="font-size:12px;padding:2px 8px;cursor:pointer;">Översätt till ' + label + '</button>';
       setFieldNote(descEl, 'translate', '');
       setFieldNote(titleEl, 'translatetitle', html);
